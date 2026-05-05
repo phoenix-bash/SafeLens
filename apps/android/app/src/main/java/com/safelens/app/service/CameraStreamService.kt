@@ -28,6 +28,7 @@ import com.safelens.app.data.CameraStreamFrameUploadDto
 import com.safelens.app.data.CameraStreamSessionStateDto
 import io.socket.client.IO
 import io.socket.client.Socket
+import io.socket.engineio.client.transports.WebSocket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -316,6 +317,10 @@ class CameraStreamService : Service() {
                 cameraFacing = freshSessionState.cameraFacing
                 includeAudio = freshSessionState.includeAudio
                 preferredTransport = freshSessionState.preferredTransport
+                Log.i(
+                    TAG,
+                    "Starting camera stream sessionId=${freshSessionState.sessionId ?: "null"} transport=${freshSessionState.preferredTransport} includeAudio=${freshSessionState.includeAudio} micPermission=${repository.hasMicrophonePermission()}."
+                )
                 updateForegroundNotification(isStreaming = true)
 
                 if (freshSessionState.sessionId == null) {
@@ -440,6 +445,10 @@ class CameraStreamService : Service() {
 
         val wantsAudio = freshSessionState.includeAudio
         val canSendAudio = wantsAudio && repository.hasMicrophonePermission()
+        Log.i(
+            TAG,
+            "Preparing local media sessionId=${freshSessionState.sessionId ?: "null"} wantsAudio=$wantsAudio canSendAudio=$canSendAudio."
+        )
         val nextAudioSource =
             if (canSendAudio) {
                 factory.createAudioSource(MediaConstraints())
@@ -450,6 +459,11 @@ class CameraStreamService : Service() {
             nextAudioSource?.let { audio ->
                 factory.createAudioTrack(AUDIO_TRACK_ID, audio)
             }
+        nextAudioTrack?.setEnabled(true)
+        Log.i(
+            TAG,
+            "Local media tracks prepared videoTrack=${nextVideoTrack.id()} audioTrack=${nextAudioTrack?.id() ?: "none"}."
+        )
 
         surfaceTextureHelper = nextSurfaceTextureHelper
         videoCapturer = nextCapturer
@@ -636,6 +650,12 @@ class CameraStreamService : Service() {
                                     cameraSessionId = cameraSessionId
                                 )
                             )
+                            if (sequence == 0 || sequence % 25 == 0) {
+                                Log.i(
+                                    TAG,
+                                    "Uploaded audio fallback chunk sequence=$sequence sessionId=$cameraSessionId bytes=${payloadBytes.size}."
+                                )
+                            }
                         }.onFailure { throwable ->
                             Log.e(TAG, "Unable to upload camera audio fallback chunk.", throwable)
                         }
@@ -825,6 +845,10 @@ class CameraStreamService : Service() {
         localAudioTrack?.let { audioTrack ->
             nextConnection.addTrack(audioTrack, listOf(MEDIA_STREAM_ID))
         }
+        Log.i(
+            TAG,
+            "Peer connection prepared for viewerId=$viewerId localVideo=${localVideoTrack != null} localAudio=${localAudioTrack != null}."
+        )
 
         peerConnectionMutex.withLock {
             peerConnections.remove(viewerId)?.close()
@@ -858,8 +882,22 @@ class CameraStreamService : Service() {
 
         val storedSession = repository.getStoredSession()
             ?: error("Device session unavailable for camera signaling.")
-        val socket = IO.socket(repository.getApiBaseUrl(), IO.Options.builder().build())
+        val socketOptions =
+            IO.Options.builder()
+                .setTransports(arrayOf(WebSocket.NAME))
+                .setReconnection(true)
+                .setReconnectionAttempts(4)
+                .setTimeout(SOCKET_CONNECT_TIMEOUT_MS)
+                .build()
+        val socket = IO.socket(repository.getApiBaseUrl(), socketOptions)
         realtimeSocket = socket
+
+        socket.on(Socket.EVENT_CONNECT_ERROR) { args ->
+            val message =
+                args.firstOrNull()?.toString()?.takeIf { it.isNotBlank() }
+                    ?: "Socket connect error."
+            Log.e(TAG, "Camera signaling socket connect error: $message")
+        }
 
         socket.on("camera.device.signal") { args ->
             val rawPayload = args.firstOrNull() ?: return@on
@@ -1489,11 +1527,11 @@ private suspend fun suspendSetDescription(
 }
 
 private class MjpegUploadSink(
-    private val onFrame: (VideoFrame) -> Unit
+    private val onFrameCallback: (VideoFrame) -> Unit
 ) : VideoSink {
     override fun onFrame(frame: VideoFrame?) {
         frame ?: return
-        onFrame(frame)
+        onFrameCallback(frame)
     }
 }
 

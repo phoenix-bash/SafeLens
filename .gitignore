@@ -4,10 +4,14 @@ dist
 coverage
 .turbo
 .gradle
+.gradle-user
 build
 out
 *.log
 .env
 .env.local
+apps/android/local.properties
+*.jks
+*.keystore
 .DS_Store
-
+/safelens-server/

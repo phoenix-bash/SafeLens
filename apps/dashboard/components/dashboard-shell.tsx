@@ -139,6 +139,9 @@ function getCameraRotationDegrees(cameraFacing: "front" | "back" | null | undefi
 function resolvePreferredCameraTransport(
   includeAudio: boolean
 ): CameraStreamSessionRequest["preferredTransport"] {
+  if (includeAudio) {
+    return "mjpeg";
+  }
   if (WEBRTC_NATIVE_ENABLED) {
     return "webrtc";
   }
@@ -460,7 +463,13 @@ export function DashboardShell() {
 
   useEffect(() => {
     const deviceIds = Object.entries(cameraStreamsByDevice)
-      .filter(([, state]) => state.loaded && !state.loading)
+      .filter(
+        ([, state]) =>
+          state.loaded &&
+          !state.loading &&
+          Boolean(state.session?.sessionId) &&
+          state.session?.status !== "idle"
+      )
       .map(([deviceId]) => deviceId);
     if (!deviceIds.length) {
       return;
@@ -468,7 +477,7 @@ export function DashboardShell() {
 
     const intervalId = window.setInterval(() => {
       deviceIds.forEach((deviceId) => {
-        loadCameraStream(deviceId).catch(() => {
+        loadCameraStream(deviceId, { silent: true }).catch(() => {
           // Surface through normal loadCameraStream error handling.
         });
       });
@@ -878,11 +887,14 @@ export function DashboardShell() {
     }
   }
 
-  async function loadCameraStream(deviceId: string) {
-    updateCameraStreamPanelState(deviceId, (state) => ({
-      ...state,
-      loading: true
-    }));
+  async function loadCameraStream(deviceId: string, options?: { silent?: boolean }) {
+    const silent = options?.silent ?? false;
+    if (!silent) {
+      updateCameraStreamPanelState(deviceId, (state) => ({
+        ...state,
+        loading: true
+      }));
+    }
 
     try {
       const state = await apiRequest<CameraStreamSessionState>(
@@ -1157,7 +1169,11 @@ export function DashboardShell() {
   }
 
   async function startAudioFallback(deviceId: string, viewerId: string) {
-    stopAudioFallback(deviceId);
+    audioFallbackEnabledRef.current[deviceId] = false;
+    clearAudioFallbackPollTimeout(deviceId);
+    delete audioFallbackViewerRef.current[deviceId];
+    delete audioFallbackSinceSeqRef.current[deviceId];
+    delete audioFallbackNextPlayAtRef.current[deviceId];
     audioFallbackEnabledRef.current[deviceId] = true;
     audioFallbackViewerRef.current[deviceId] = viewerId;
     audioFallbackSinceSeqRef.current[deviceId] = 0;
@@ -1361,7 +1377,14 @@ export function DashboardShell() {
     }
 
     connection.ontrack = (event) => {
-      event.streams[0]?.getTracks().forEach((track) => {
+      const incomingTracks =
+        event.streams[0]?.getTracks().length
+          ? event.streams[0].getTracks()
+          : [event.track];
+      incomingTracks.forEach((track) => {
+        if (!track) {
+          return;
+        }
         if (!remoteStream.getTracks().some((existing) => existing.id === track.id)) {
           remoteStream.addTrack(track);
         }
@@ -1415,6 +1438,25 @@ export function DashboardShell() {
           transport: "webrtc",
           mjpegUrl: null
         }));
+
+        if (joinedState.includeAudio) {
+          window.setTimeout(() => {
+            const currentState = getCameraStreamState(deviceId);
+            if (currentState.viewerId !== viewerId || currentState.transport !== "webrtc") {
+              return;
+            }
+            const currentRemoteStream = remoteStreamsRef.current[deviceId];
+            const hasAudioTrack =
+              (currentRemoteStream?.getAudioTracks().length ?? 0) > 0;
+            if (hasAudioTrack) {
+              return;
+            }
+            switchToMjpegFallback(deviceId, viewerId, true);
+            setError(
+              "WebRTC connected but no remote audio track arrived. Switched to MJPEG video with PCM fallback audio."
+            );
+          }, 4_000);
+        }
       }
 
       if (
@@ -1593,6 +1635,17 @@ export function DashboardShell() {
 
     try {
       const currentState = getCameraStreamState(deviceId);
+      if (currentState.includeAudio) {
+        try {
+          await ensureAudioContext(deviceId);
+        } catch (audioContextError) {
+          throw new Error(
+            audioContextError instanceof Error
+              ? audioContextError.message
+              : "Browser blocked audio context initialization for live audio playback."
+          );
+        }
+      }
       const preferredTransport = resolvePreferredCameraTransport(
         currentState.includeAudio
       );
@@ -1630,7 +1683,7 @@ export function DashboardShell() {
 
       [500, 1_500, 3_000, 6_000].forEach((delayMs) => {
         window.setTimeout(() => {
-          loadCameraStream(deviceId).catch(() => {
+          loadCameraStream(deviceId, { silent: true }).catch(() => {
             // Surface through normal loadCameraStream error handling.
           });
         }, delayMs);
@@ -1658,7 +1711,7 @@ export function DashboardShell() {
       });
       [500, 1_500, 3_000].forEach((delayMs) => {
         window.setTimeout(() => {
-          loadCameraStream(deviceId).catch(() => {
+          loadCameraStream(deviceId, { silent: true }).catch(() => {
             // Surface through normal loadCameraStream error handling.
           });
         }, delayMs);
@@ -1946,8 +1999,11 @@ export function DashboardShell() {
               {devices.map((device) => {
                 const cameraStream = getCameraStreamState(device.id);
                 const streamState = cameraStream.session;
-                const isActivationBlocked = streamState?.status === "activation_blocked";
+                const effectiveIncludeAudio =
+                  streamState?.includeAudio ?? cameraStream.includeAudio;
                 const streamErrorMessage = resolveCameraErrorMessage(streamState, "");
+                const isActivationBlocked =
+                  streamState?.status === "activation_blocked";
                 const showMjpeg = cameraStream.transport === "mjpeg" && cameraStream.mjpegUrl;
                 const effectiveCameraFacing =
                   streamState?.cameraFacing ?? cameraStream.selectedFacing;
@@ -2082,10 +2138,10 @@ export function DashboardShell() {
                         <div className="camera-feed-stage">
                         <video
                           autoPlay
-                          controls={cameraStream.includeAudio}
-                          muted={!cameraStream.includeAudio}
+                          controls={effectiveIncludeAudio}
+                          muted={!effectiveIncludeAudio}
                           onClick={(event) => {
-                            if (!cameraStream.includeAudio) {
+                            if (!effectiveIncludeAudio) {
                               return;
                             }
                             const element = event.currentTarget;

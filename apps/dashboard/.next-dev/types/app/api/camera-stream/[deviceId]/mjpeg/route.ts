@@ -1,4 +1,4 @@
-// File: /home/phoenix/SafeLens/apps/dashboard/app/api/camera-stream/[deviceId]/mjpeg/route.ts
+// File: D:\SafeLens\apps\dashboard\app\api\camera-stream\[deviceId]\mjpeg\route.ts
 import * as entry from '../../../../../../../app/api/camera-stream/[deviceId]/mjpeg/route.js'
 import type { NextRequest } from 'next/server.js'
 

@@ -1,5 +1,4 @@
 {
-  "/dashboard/page": "app/dashboard/page.js",
-  "/page": "app/page.js",
-  "/login/page": "app/login/page.js"
+  "/api/camera-stream/[deviceId]/mjpeg/route": "app/api/camera-stream/[deviceId]/mjpeg/route.js",
+  "/dashboard/page": "app/dashboard/page.js"
 }
