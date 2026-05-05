@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="scan_title">Scan to Pair</string>
+    <string name="scan_subtitle">Center the SafeLens QR inside the frame to pair this device.</string>
+    <string name="scan_status_searching">Scanner armed</string>
+    <string name="scan_status_detected">QR locked. Pairing now...</string>
+    <string name="scan_hint">No tap needed. The code will capture automatically.</string>
+    <string name="scan_footer">Encrypted pairing only. Unknown QR codes are ignored.</string>
+    <string name="scan_close">Close scanner</string>
+    <string name="battery_settings_title">Background protection</string>
+    <string name="battery_settings_summary">Allow SafeLens to ignore battery optimizations so the trusted session can keep polling in the background.</string>
+    <string name="battery_settings_enabled">Battery optimization ignored. Background heartbeat is protected.</string>
+    <string name="battery_settings_disabled">Battery optimization is still active. Android may stop SafeLens in the background.</string>
+    <string name="battery_settings_enable">Allow background protection</string>
+    <string name="battery_settings_manage">Open battery settings</string>
+</resources>

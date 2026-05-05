@@ -1,0 +1,235 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String         @id @default(uuid()) @db.Uuid
+  email        String         @unique
+  displayName  String
+  createdAt    DateTime       @default(now())
+  workspace    Workspace?
+  identities   AuthIdentity[]
+  refreshTokens RefreshToken[]
+}
+
+model Workspace {
+  id          String       @id @default(uuid()) @db.Uuid
+  name        String
+  ownerUserId String       @unique @db.Uuid
+  createdAt   DateTime     @default(now())
+  owner       User         @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  devices     Device[]
+  deviceSessions DeviceSession[]
+  deviceCommands DeviceCommand[]
+  syncCursors  SyncCursor[]
+  telemetryStates DeviceTelemetryState[]
+  telemetryHistory DeviceTelemetryHistory[]
+  notifications NotificationRecord[]
+  callLogs      CallLogRecord[]
+  refreshTokens RefreshToken[]
+  auditEvents AuditEvent[]
+}
+
+model AuthIdentity {
+  id              String   @id @default(uuid()) @db.Uuid
+  userId          String   @db.Uuid
+  provider        String
+  providerSubject String
+  email           String
+  passwordHash    String?
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerSubject])
+  @@index([email, provider])
+}
+
+model Device {
+  id             String             @id @default(uuid()) @db.Uuid
+  workspaceId    String             @db.Uuid
+  fingerprint    String?
+  name           String
+  model          String
+  manufacturer   String
+  androidVersion String
+  pairedAt       DateTime           @default(now())
+  lastSeenAt     DateTime           @default(now())
+  isOnline       Boolean            @default(false)
+  activeSessionId String?           @db.Uuid
+  workspace      Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  capabilities   DeviceCapability[]
+  sessions       DeviceSession[]
+  commands       DeviceCommand[]
+  syncCursors    SyncCursor[]
+  telemetryState DeviceTelemetryState?
+  telemetryHistory DeviceTelemetryHistory[]
+  notifications  NotificationRecord[]
+  callLogs       CallLogRecord[]
+
+  @@index([workspaceId])
+  @@unique([workspaceId, fingerprint])
+}
+
+model DeviceCommand {
+  id             String   @id @default(uuid()) @db.Uuid
+  deviceId       String   @db.Uuid
+  workspaceId    String   @db.Uuid
+  type           String
+  status         String
+  payload        Json
+  createdAt      DateTime @default(now())
+  dispatchedAt   DateTime?
+  acknowledgedAt DateTime?
+  completedAt    DateTime?
+  lastError      String?
+  device         Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId, status, createdAt])
+  @@index([workspaceId, createdAt])
+}
+
+model SyncCursor {
+  id          String   @id @default(uuid()) @db.Uuid
+  deviceId    String   @db.Uuid
+  workspaceId String   @db.Uuid
+  scope       String
+  cursorValue String
+  updatedAt   DateTime @updatedAt
+  device      Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, scope])
+  @@index([workspaceId, scope])
+}
+
+model DeviceTelemetryState {
+  id                       String   @id @default(uuid()) @db.Uuid
+  deviceId                 String   @unique @db.Uuid
+  workspaceId              String   @db.Uuid
+  locationReportingEnabled Boolean  @default(true)
+  locationIntervalMinutes  Int      @default(10)
+  latestInfo               Json?
+  latestInfoAt             DateTime?
+  latestBattery            Json?
+  latestBatteryAt          DateTime?
+  latestLocation           Json?
+  latestLocationAt         DateTime?
+  device                   Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  workspace                Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+}
+
+model DeviceTelemetryHistory {
+  id          String   @id @default(uuid()) @db.Uuid
+  clientId    String   @unique
+  deviceId    String   @db.Uuid
+  workspaceId String   @db.Uuid
+  kind        String
+  payload     Json
+  collectedAt DateTime
+  createdAt   DateTime @default(now())
+  device      Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId, kind, collectedAt])
+  @@index([workspaceId, collectedAt])
+}
+
+model NotificationRecord {
+  id          String   @id @default(uuid()) @db.Uuid
+  clientId    String   @unique
+  fingerprint String
+  deviceId    String   @db.Uuid
+  workspaceId String   @db.Uuid
+  packageName String
+  appLabel    String
+  title       String
+  text        String
+  postedAt    DateTime
+  createdAt   DateTime @default(now())
+  device      Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, fingerprint])
+  @@index([deviceId, postedAt])
+  @@index([workspaceId, postedAt])
+  @@index([deviceId, appLabel, postedAt])
+}
+
+model CallLogRecord {
+  id              String   @id @default(uuid()) @db.Uuid
+  clientId        String   @unique
+  fingerprint     String
+  deviceId        String   @db.Uuid
+  workspaceId     String   @db.Uuid
+  contactName     String?
+  phoneNumber     String
+  callType        String
+  durationSeconds Int
+  occurredAt      DateTime
+  createdAt       DateTime @default(now())
+  device          Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, fingerprint])
+  @@index([deviceId, occurredAt])
+  @@index([workspaceId, occurredAt])
+  @@index([deviceId, callType, occurredAt])
+}
+
+model DeviceCapability {
+  id      String @id @default(uuid()) @db.Uuid
+  deviceId String @db.Uuid
+  key     String
+  label   String
+  status  String
+  device  Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId])
+}
+
+model DeviceSession {
+  id         String   @id @default(uuid()) @db.Uuid
+  deviceId    String   @db.Uuid
+  workspaceId String   @db.Uuid
+  deviceToken String   @unique
+  expiresAt   DateTime
+  lastSeenAt  DateTime @default(now())
+  revokedAt   DateTime?
+  device      Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+}
+
+model RefreshToken {
+  token       String   @id
+  userId      String   @db.Uuid
+  workspaceId String   @db.Uuid
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([workspaceId])
+}
+
+model AuditEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  workspaceId String  @db.Uuid
+  actorType  String
+  actorId    String
+  eventType  String
+  payload    Json
+  createdAt  DateTime @default(now())
+  workspace  Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+}

@@ -1,0 +1,26 @@
+{
+  "name": "safelens",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/api",
+    "apps/dashboard",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev --workspace @safelens/api",
+    "dev:dashboard": "npm run dev --workspace @safelens/dashboard",
+    "build": "npm run build --workspace @safelens/contracts && npm run build --workspace @safelens/api && npm run build --workspace @safelens/dashboard",
+    "test": "npm run test --workspace @safelens/contracts && npm run test --workspace @safelens/api",
+    "typecheck": "npm run typecheck --workspace @safelens/contracts && npm run typecheck --workspace @safelens/api && npm run typecheck --workspace @safelens/dashboard"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.1",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}
