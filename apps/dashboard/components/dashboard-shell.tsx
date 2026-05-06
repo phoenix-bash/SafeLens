@@ -11,9 +11,10 @@ import {
   CameraStreamAudioPollResponse,
   CameraStreamSessionRequest,
   CameraStreamSessionState,
-  CameraViewerSignal,
   CallLogsPage,
+  CallRecordingsPage,
   CreateDeviceCommandRequest,
+  DeviceCommandView,
   DeviceDetail,
   DeviceSummary,
   DeviceTelemetryState,
@@ -27,7 +28,8 @@ const FEATURE_MODULES = [
   "Screen Mirroring",
   "Location",
   "Notifications",
-  "Call Logs"
+  "Call Logs",
+  "Call Recordings"
 ];
 
 type DeviceCameraStreamPanelState = {
@@ -37,7 +39,7 @@ type DeviceCameraStreamPanelState = {
   selectedFacing: "front" | "back";
   includeAudio: boolean;
   viewerId: string | null;
-  transport: "webrtc" | "mjpeg" | null;
+  transport: "mjpeg" | null;
   mjpegUrl: string | null;
   audioFallbackActive: boolean;
   audioFallbackError: string | null;
@@ -62,6 +64,15 @@ type DeviceCallLogsState = {
   loaded: boolean;
 };
 
+type DeviceCallRecordingsState = {
+  items: CallRecordingsPage["items"];
+  nextCursor: string | null;
+  loading: boolean;
+  loaded: boolean;
+  selectedIds: string[];
+  downloading: boolean;
+};
+
 const EMPTY_NOTIFICATIONS_STATE: DeviceNotificationsState = {
   items: [],
   nextCursor: null,
@@ -80,6 +91,15 @@ const EMPTY_CALL_LOGS_STATE: DeviceCallLogsState = {
   loaded: false
 };
 
+const EMPTY_CALL_RECORDINGS_STATE: DeviceCallRecordingsState = {
+  items: [],
+  nextCursor: null,
+  loading: false,
+  loaded: false,
+  selectedIds: [],
+  downloading: false
+};
+
 const EMPTY_CAMERA_STREAM_STATE: DeviceCameraStreamPanelState = {
   session: null,
   loading: false,
@@ -93,9 +113,6 @@ const EMPTY_CAMERA_STREAM_STATE: DeviceCameraStreamPanelState = {
   audioFallbackError: null,
   audioFallbackLastChunkAt: null
 };
-
-const WEBRTC_NATIVE_ENABLED =
-  process.env.NEXT_PUBLIC_ENABLE_WEBRTC_NATIVE === "true";
 
 const CAMERA_ERROR_MESSAGES: Record<CameraStreamErrorCode, string> = {
   service_not_armed:
@@ -137,16 +154,17 @@ function getCameraRotationDegrees(cameraFacing: "front" | "back" | null | undefi
 }
 
 function resolvePreferredCameraTransport(
-  includeAudio: boolean
+  _includeAudio: boolean
 ): CameraStreamSessionRequest["preferredTransport"] {
-  if (includeAudio) {
-    return "mjpeg";
-  }
-  if (WEBRTC_NATIVE_ENABLED) {
-    return "webrtc";
-  }
   return "mjpeg";
 }
+
+type DeviceCommandAction =
+  | "camera"
+  | "telemetry"
+  | "notifications"
+  | "callLogs"
+  | "callRecordings";
 
 export function DashboardShell() {
   const { session, clearSession } = useSession();
@@ -159,13 +177,19 @@ export function DashboardShell() {
   const [activeDeviceId, setActiveDeviceId] = useState<string | null>(null);
   const [checkingDeviceId, setCheckingDeviceId] = useState<string | null>(null);
   const [removingDeviceId, setRemovingDeviceId] = useState<string | null>(null);
-  const [commandingDeviceId, setCommandingDeviceId] = useState<string | null>(null);
+  const [commandingDeviceAction, setCommandingDeviceAction] = useState<{
+    deviceId: string;
+    action: DeviceCommandAction;
+  } | null>(null);
   const [clearingNotificationsDeviceId, setClearingNotificationsDeviceId] = useState<
     string | null
   >(null);
   const [clearingCallLogsDeviceId, setClearingCallLogsDeviceId] = useState<string | null>(
     null
   );
+  const [clearingCallRecordingsDeviceId, setClearingCallRecordingsDeviceId] = useState<
+    string | null
+  >(null);
   const [telemetryByDevice, setTelemetryByDevice] = useState<
     Record<string, DeviceTelemetryState>
   >({});
@@ -175,20 +199,20 @@ export function DashboardShell() {
   const [callLogsByDevice, setCallLogsByDevice] = useState<
     Record<string, DeviceCallLogsState>
   >({});
+  const [callRecordingsByDevice, setCallRecordingsByDevice] = useState<
+    Record<string, DeviceCallRecordingsState>
+  >({});
   const [cameraStreamsByDevice, setCameraStreamsByDevice] = useState<
     Record<string, DeviceCameraStreamPanelState>
   >({});
   const [error, setError] = useState<string | null>(null);
+  const cameraStreamsByDeviceRef = useRef<Record<string, DeviceCameraStreamPanelState>>(
+    {}
+  );
   const previousDeviceIdsRef = useRef<string[]>([]);
   const cameraSocketRef = useRef<Socket | null>(null);
-  const peerConnectionsRef = useRef<Record<string, RTCPeerConnection>>({});
-  const remoteStreamsRef = useRef<Record<string, MediaStream>>({});
-  const videoElementsRef = useRef<Record<string, HTMLVideoElement | null>>({});
   const viewerToDeviceRef = useRef<Record<string, string>>({});
   const viewerTimeoutsRef = useRef<Record<string, number>>({});
-  const pendingRemoteIceCandidatesRef = useRef<
-    Record<string, RTCIceCandidateInit[]>
-  >({});
   const audioContextsRef = useRef<Record<string, AudioContext>>({});
   const audioFallbackEnabledRef = useRef<Record<string, boolean>>({});
   const audioFallbackViewerRef = useRef<Record<string, string>>({});
@@ -214,7 +238,8 @@ export function DashboardShell() {
     setTelemetryByDevice((current) => pruneDeviceStateMap(current, nextDeviceIds));
     setNotificationsByDevice((current) => pruneDeviceStateMap(current, nextDeviceIds));
     setCallLogsByDevice((current) => pruneDeviceStateMap(current, nextDeviceIds));
-    setCameraStreamsByDevice((current) => pruneDeviceStateMap(current, nextDeviceIds));
+    setCallRecordingsByDevice((current) => pruneDeviceStateMap(current, nextDeviceIds));
+    setCameraStreamsState((current) => pruneDeviceStateMap(current, nextDeviceIds));
   }
 
   function clearActivePairingCode() {
@@ -231,6 +256,16 @@ export function DashboardShell() {
     return Object.fromEntries(
       Object.entries(current).filter(([deviceId]) => nextDeviceIds.includes(deviceId))
     ) as Record<string, T>;
+  }
+
+  function setCameraStreamsState(
+    updater: (
+      current: Record<string, DeviceCameraStreamPanelState>
+    ) => Record<string, DeviceCameraStreamPanelState>
+  ) {
+    const next = updater(cameraStreamsByDeviceRef.current);
+    cameraStreamsByDeviceRef.current = next;
+    setCameraStreamsByDevice(next);
   }
 
   async function refreshPairingCodeStatus(accessToken: string) {
@@ -280,6 +315,10 @@ export function DashboardShell() {
       expiresAt: pairingCode.expiresAt
     });
   }, [pairingApiBaseUrl, pairingCode]);
+
+  useEffect(() => {
+    cameraStreamsByDeviceRef.current = cameraStreamsByDevice;
+  }, [cameraStreamsByDevice]);
 
   useEffect(() => {
     let active = true;
@@ -333,6 +372,73 @@ export function DashboardShell() {
         creationError instanceof Error
           ? creationError.message
           : "Could not generate a pairing code."
+      );
+    }
+  }
+
+  async function loadCallRecordings(
+    deviceId: string,
+    options?: {
+      append?: boolean;
+      cursor?: string | null;
+      silent?: boolean;
+    }
+  ) {
+    const append = options?.append ?? false;
+    const silent = options?.silent ?? false;
+    const currentState = getCallRecordingsState(deviceId);
+    const cursor =
+      options?.cursor !== undefined
+        ? options.cursor
+        : append
+          ? currentState.nextCursor
+          : null;
+
+    if (!silent) {
+      updateCallRecordingsState(deviceId, (state) => ({
+        ...state,
+        loading: true
+      }));
+    }
+
+    try {
+      const searchParams = new URLSearchParams();
+      searchParams.set("limit", "10");
+      if (cursor) {
+        searchParams.set("cursor", cursor);
+      }
+
+      const page = await apiRequest<CallRecordingsPage>(
+        `/devices/${deviceId}/call-recordings?${searchParams.toString()}`,
+        { accessToken }
+      );
+
+      updateCallRecordingsState(deviceId, (state) => {
+        const selected = new Set(state.selectedIds);
+        const nextItems = append ? [...state.items, ...page.items] : page.items;
+        const availableIds = new Set(nextItems.map((item) => item.id));
+        const nextSelectedIds = [...selected].filter((id) => availableIds.has(id));
+
+        return {
+          ...state,
+          loading: false,
+          loaded: true,
+          items: nextItems,
+          nextCursor: page.nextCursor,
+          selectedIds: nextSelectedIds
+        };
+      });
+    } catch (recordingsError) {
+      if (!silent) {
+        updateCallRecordingsState(deviceId, (state) => ({
+          ...state,
+          loading: false
+        }));
+      }
+      setError(
+        recordingsError instanceof Error
+          ? recordingsError.message
+          : "Could not load call recordings."
       );
     }
   }
@@ -429,7 +535,7 @@ export function DashboardShell() {
 
     const intervalId = window.setInterval(() => {
       deviceIds.forEach((deviceId) => {
-        loadNotifications(deviceId).catch(() => {
+        loadNotifications(deviceId, { silent: true }).catch(() => {
           // Surface through normal loadNotifications error handling.
         });
       });
@@ -450,7 +556,7 @@ export function DashboardShell() {
 
     const intervalId = window.setInterval(() => {
       deviceIds.forEach((deviceId) => {
-        loadCallLogs(deviceId).catch(() => {
+        loadCallLogs(deviceId, { silent: true }).catch(() => {
           // Surface through normal loadCallLogs error handling.
         });
       });
@@ -460,6 +566,27 @@ export function DashboardShell() {
       window.clearInterval(intervalId);
     };
   }, [callLogsByDevice]);
+
+  useEffect(() => {
+    const deviceIds = Object.entries(callRecordingsByDevice)
+      .filter(([, state]) => state.loaded && !state.loading)
+      .map(([deviceId]) => deviceId);
+    if (!deviceIds.length) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      deviceIds.forEach((deviceId) => {
+        loadCallRecordings(deviceId, { silent: true }).catch(() => {
+          // Surface through normal loadCallRecordings error handling.
+        });
+      });
+    }, 10_000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [callRecordingsByDevice]);
 
   useEffect(() => {
     const deviceIds = Object.entries(cameraStreamsByDevice)
@@ -499,7 +626,7 @@ export function DashboardShell() {
     });
 
     socket.on("camera.session.updated", (payload: CameraSessionUpdatedEvent) => {
-      setCameraStreamsByDevice((current) => {
+      setCameraStreamsState((current) => {
         const existing = current[payload.deviceId] ?? EMPTY_CAMERA_STREAM_STATE;
         return {
           ...current,
@@ -513,61 +640,8 @@ export function DashboardShell() {
       });
     });
 
-    socket.on(
-      "camera.viewer.signal",
-      async (payload: CameraViewerSignal & { deviceId: string }) => {
-        const deviceId = viewerToDeviceRef.current[payload.viewerId] ?? payload.deviceId;
-        const connection = peerConnectionsRef.current[deviceId];
-        if (!connection) {
-          return;
-        }
-
-        try {
-          if (payload.signal.type === "answer" && payload.signal.sdp) {
-            await connection.setRemoteDescription({
-              type: "answer",
-              sdp: payload.signal.sdp
-            });
-
-            const queuedCandidates =
-              pendingRemoteIceCandidatesRef.current[deviceId] ?? [];
-            for (const queuedCandidate of queuedCandidates) {
-              await connection.addIceCandidate(queuedCandidate);
-            }
-            pendingRemoteIceCandidatesRef.current[deviceId] = [];
-            return;
-          }
-
-          if (payload.signal.type === "ice-candidate" && payload.signal.candidate) {
-            const candidate: RTCIceCandidateInit = {
-              candidate: payload.signal.candidate,
-              sdpMid: payload.signal.sdpMid ?? undefined,
-              sdpMLineIndex: payload.signal.sdpMLineIndex ?? undefined,
-              usernameFragment: payload.signal.usernameFragment ?? undefined
-            };
-            const remoteDescriptionReady = Boolean(connection.remoteDescription?.type);
-            if (!remoteDescriptionReady) {
-              const queuedCandidates =
-                pendingRemoteIceCandidatesRef.current[deviceId] ?? [];
-              pendingRemoteIceCandidatesRef.current[deviceId] = [
-                ...queuedCandidates,
-                candidate
-              ];
-              return;
-            }
-            await connection.addIceCandidate(candidate);
-          }
-        } catch {
-          setError(
-            "WebRTC signaling failed while applying remote negotiation data. Try Start stream again."
-          );
-        }
-      }
-    );
-
     return () => {
       const connectedDeviceIds = new Set<string>([
-        ...Object.keys(peerConnectionsRef.current),
         ...Object.values(viewerToDeviceRef.current)
       ]);
       connectedDeviceIds.forEach((deviceId) => {
@@ -606,6 +680,7 @@ export function DashboardShell() {
 
     try {
       closeCameraViewer(deviceId);
+      releaseCameraAudioContext(deviceId);
       const detail = await apiRequest<DeviceDetail>(`/devices/${deviceId}/revoke-session`, {
         method: "POST",
         accessToken
@@ -613,7 +688,7 @@ export function DashboardShell() {
       setDevices((currentDevices) =>
         currentDevices.map((device) => (device.id === deviceId ? detail : device))
       );
-      setCameraStreamsByDevice((current) => {
+      setCameraStreamsState((current) => {
         const next = { ...current };
         delete next[deviceId];
         return next;
@@ -635,6 +710,7 @@ export function DashboardShell() {
 
     try {
       closeCameraViewer(deviceId);
+      releaseCameraAudioContext(deviceId);
       await apiRequest<{ success: boolean }>(`/devices/${deviceId}`, {
         method: "DELETE",
         accessToken
@@ -657,7 +733,12 @@ export function DashboardShell() {
         delete next[deviceId];
         return next;
       });
-      setCameraStreamsByDevice((current) => {
+      setCallRecordingsByDevice((current) => {
+        const next = { ...current };
+        delete next[deviceId];
+        return next;
+      });
+      setCameraStreamsState((current) => {
         const next = { ...current };
         delete next[deviceId];
         return next;
@@ -707,8 +788,19 @@ export function DashboardShell() {
     return callLogsByDevice[deviceId] ?? EMPTY_CALL_LOGS_STATE;
   }
 
+  function getCallRecordingsState(deviceId: string): DeviceCallRecordingsState {
+    return callRecordingsByDevice[deviceId] ?? EMPTY_CALL_RECORDINGS_STATE;
+  }
+
   function getCameraStreamState(deviceId: string): DeviceCameraStreamPanelState {
-    return cameraStreamsByDevice[deviceId] ?? EMPTY_CAMERA_STREAM_STATE;
+    return cameraStreamsByDeviceRef.current[deviceId] ?? EMPTY_CAMERA_STREAM_STATE;
+  }
+
+  function isCommandingDeviceAction(deviceId: string, action: DeviceCommandAction) {
+    return (
+      commandingDeviceAction?.deviceId === deviceId &&
+      commandingDeviceAction.action === action
+    );
   }
 
   function updateNotificationsState(
@@ -731,22 +823,24 @@ export function DashboardShell() {
     }));
   }
 
+  function updateCallRecordingsState(
+    deviceId: string,
+    updater: (current: DeviceCallRecordingsState) => DeviceCallRecordingsState
+  ) {
+    setCallRecordingsByDevice((current) => ({
+      ...current,
+      [deviceId]: updater(current[deviceId] ?? EMPTY_CALL_RECORDINGS_STATE)
+    }));
+  }
+
   function updateCameraStreamPanelState(
     deviceId: string,
     updater: (current: DeviceCameraStreamPanelState) => DeviceCameraStreamPanelState
   ) {
-    setCameraStreamsByDevice((current) => ({
+    setCameraStreamsState((current) => ({
       ...current,
       [deviceId]: updater(current[deviceId] ?? EMPTY_CAMERA_STREAM_STATE)
     }));
-  }
-
-  function setCameraVideoElement(deviceId: string, element: HTMLVideoElement | null) {
-    videoElementsRef.current[deviceId] = element;
-    const stream = remoteStreamsRef.current[deviceId];
-    if (element) {
-      element.srcObject = stream ?? null;
-    }
   }
 
   function updateCameraFacingSelection(deviceId: string, value: "front" | "back") {
@@ -770,9 +864,11 @@ export function DashboardShell() {
       appLabel?: string | null;
       appliedQuery?: string;
       cursor?: string | null;
+      silent?: boolean;
     }
   ) {
     const append = options?.append ?? false;
+    const silent = options?.silent ?? false;
     const currentState = getNotificationsState(deviceId);
     const appLabel =
       options && "appLabel" in options ? options.appLabel ?? null : currentState.appLabel;
@@ -787,10 +883,12 @@ export function DashboardShell() {
           ? currentState.nextCursor
           : null;
 
-    updateNotificationsState(deviceId, (state) => ({
-      ...state,
-      loading: true
-    }));
+    if (!silent) {
+      updateNotificationsState(deviceId, (state) => ({
+        ...state,
+        loading: true
+      }));
+    }
 
     try {
       const searchParams = new URLSearchParams();
@@ -822,10 +920,12 @@ export function DashboardShell() {
         appGroups: page.appGroups
       }));
     } catch (notificationsError) {
-      updateNotificationsState(deviceId, (state) => ({
-        ...state,
-        loading: false
-      }));
+      if (!silent) {
+        updateNotificationsState(deviceId, (state) => ({
+          ...state,
+          loading: false
+        }));
+      }
       setError(
         notificationsError instanceof Error
           ? notificationsError.message
@@ -839,9 +939,11 @@ export function DashboardShell() {
     options?: {
       append?: boolean;
       cursor?: string | null;
+      silent?: boolean;
     }
   ) {
     const append = options?.append ?? false;
+    const silent = options?.silent ?? false;
     const currentState = getCallLogsState(deviceId);
     const cursor =
       options?.cursor !== undefined
@@ -850,10 +952,12 @@ export function DashboardShell() {
           ? currentState.nextCursor
           : null;
 
-    updateCallLogsState(deviceId, (state) => ({
-      ...state,
-      loading: true
-    }));
+    if (!silent) {
+      updateCallLogsState(deviceId, (state) => ({
+        ...state,
+        loading: true
+      }));
+    }
 
     try {
       const searchParams = new URLSearchParams();
@@ -875,10 +979,12 @@ export function DashboardShell() {
         nextCursor: page.nextCursor
       }));
     } catch (callLogsError) {
-      updateCallLogsState(deviceId, (state) => ({
-        ...state,
-        loading: false
-      }));
+      if (!silent) {
+        updateCallLogsState(deviceId, (state) => ({
+          ...state,
+          loading: false
+        }));
+      }
       setError(
         callLogsError instanceof Error
           ? callLogsError.message
@@ -916,7 +1022,7 @@ export function DashboardShell() {
         cameraStreamError instanceof Error ? cameraStreamError.message : "";
       if (/404|not found/i.test(message)) {
         closeCameraViewer(deviceId, false);
-        setCameraStreamsByDevice((current) => {
+        setCameraStreamsState((current) => {
           const next = { ...current };
           delete next[deviceId];
           return next;
@@ -1045,10 +1151,14 @@ export function DashboardShell() {
   async function ensureAudioContext(deviceId: string) {
     const existingContext = audioContextsRef.current[deviceId];
     if (existingContext) {
-      if (existingContext.state === "suspended") {
-        await existingContext.resume();
+      if (existingContext.state === "closed") {
+        delete audioContextsRef.current[deviceId];
+      } else {
+        if (existingContext.state === "suspended") {
+          await existingContext.resume();
+        }
+        return existingContext;
       }
-      return existingContext;
     }
 
     const ContextCtor =
@@ -1066,6 +1176,17 @@ export function DashboardShell() {
 
     audioContextsRef.current[deviceId] = nextContext;
     return nextContext;
+  }
+
+  function releaseCameraAudioContext(deviceId: string) {
+    const context = audioContextsRef.current[deviceId];
+    if (!context) {
+      return;
+    }
+    if (context.state !== "closed") {
+      void context.close().catch(() => undefined);
+    }
+    delete audioContextsRef.current[deviceId];
   }
 
   async function fetchAudioFallbackChunks(deviceId: string, sinceSeq: number) {
@@ -1197,7 +1318,7 @@ export function DashboardShell() {
     }
   }
 
-  function stopAudioFallback(deviceId: string) {
+  function stopAudioFallback(deviceId: string, releaseAudioContext = false) {
     audioFallbackEnabledRef.current[deviceId] = false;
     delete audioFallbackViewerRef.current[deviceId];
     clearAudioFallbackPollTimeout(deviceId);
@@ -1205,7 +1326,7 @@ export function DashboardShell() {
     delete audioFallbackNextPlayAtRef.current[deviceId];
 
     const context = audioContextsRef.current[deviceId];
-    if (context) {
+    if (releaseAudioContext && context) {
       void context.close().catch(() => {
         // Best-effort cleanup.
       });
@@ -1220,9 +1341,13 @@ export function DashboardShell() {
     }));
   }
 
-  function closeCameraViewer(deviceId: string, leaveViewer = true) {
+  function closeCameraViewer(
+    deviceId: string,
+    leaveViewer = true,
+    releaseAudioContext = false
+  ) {
     clearViewerTimeout(deviceId);
-    stopAudioFallback(deviceId);
+    stopAudioFallback(deviceId, releaseAudioContext);
 
     const state = getCameraStreamState(deviceId);
     if (leaveViewer && state.viewerId && cameraSocketRef.current?.connected) {
@@ -1231,19 +1356,6 @@ export function DashboardShell() {
         viewerId: state.viewerId
       });
       delete viewerToDeviceRef.current[state.viewerId];
-    }
-
-    peerConnectionsRef.current[deviceId]?.close();
-    delete peerConnectionsRef.current[deviceId];
-
-    const stream = remoteStreamsRef.current[deviceId];
-    stream?.getTracks().forEach((track) => track.stop());
-    delete remoteStreamsRef.current[deviceId];
-    delete pendingRemoteIceCandidatesRef.current[deviceId];
-
-    const videoElement = videoElementsRef.current[deviceId];
-    if (videoElement) {
-      videoElement.srcObject = null;
     }
 
     updateCameraStreamPanelState(deviceId, (current) => ({
@@ -1267,9 +1379,6 @@ export function DashboardShell() {
         transport: "mjpeg"
       });
     }
-
-    peerConnectionsRef.current[deviceId]?.close();
-    delete peerConnectionsRef.current[deviceId];
 
     updateCameraStreamPanelState(deviceId, (current) => ({
       ...current,
@@ -1338,177 +1447,6 @@ export function DashboardShell() {
     });
   }
 
-  async function connectCameraViewer(
-    deviceId: string,
-    sessionState: CameraStreamSessionState
-  ) {
-    if (!sessionState.sessionId) {
-      throw new Error("Camera session is not ready yet.");
-    }
-
-    closeCameraViewer(deviceId);
-
-    const socket = getOrCreateCameraSocket();
-    const viewerId = crypto.randomUUID();
-    viewerToDeviceRef.current[viewerId] = deviceId;
-    let joinedState: CameraStreamSessionState;
-    try {
-      joinedState = await joinCameraViewer(socket, deviceId, viewerId);
-    } catch (error) {
-      delete viewerToDeviceRef.current[viewerId];
-      throw error;
-    }
-
-    const connection = new RTCPeerConnection({
-      iceServers: joinedState.iceServers.map((server) => ({
-        urls: server.urls,
-        username: server.username,
-        credential: server.credential
-      }))
-    });
-    const remoteStream = new MediaStream();
-    remoteStreamsRef.current[deviceId] = remoteStream;
-    peerConnectionsRef.current[deviceId] = connection;
-    pendingRemoteIceCandidatesRef.current[deviceId] = [];
-
-    const videoElement = videoElementsRef.current[deviceId];
-    if (videoElement) {
-      videoElement.srcObject = remoteStream;
-    }
-
-    connection.ontrack = (event) => {
-      const incomingTracks =
-        event.streams[0]?.getTracks().length
-          ? event.streams[0].getTracks()
-          : [event.track];
-      incomingTracks.forEach((track) => {
-        if (!track) {
-          return;
-        }
-        if (!remoteStream.getTracks().some((existing) => existing.id === track.id)) {
-          remoteStream.addTrack(track);
-        }
-      });
-      const element = videoElementsRef.current[deviceId];
-      if (element) {
-        element.srcObject = remoteStream;
-        if (joinedState.includeAudio) {
-          element.muted = false;
-        }
-        void element.play().catch(() => {
-          if (joinedState.includeAudio) {
-            setError(
-              "Browser blocked autoplay with audio. Click the live feed once to enable sound."
-            );
-          }
-        });
-      }
-    };
-
-    connection.onicecandidate = (event) => {
-      if (!event.candidate) {
-        return;
-      }
-
-      socket.emit("camera.viewer.signal", {
-        deviceId,
-        viewerId,
-        signal: {
-          type: "ice-candidate",
-          candidate: event.candidate.candidate,
-          sdpMid: event.candidate.sdpMid,
-          sdpMLineIndex: event.candidate.sdpMLineIndex,
-          usernameFragment: event.candidate.usernameFragment
-        }
-      });
-    };
-
-    connection.onconnectionstatechange = () => {
-      if (connection.connectionState === "connected") {
-        clearViewerTimeout(deviceId);
-        stopAudioFallback(deviceId);
-        socket.emit("camera.viewer.transport", {
-          deviceId,
-          viewerId,
-          transport: "webrtc"
-        });
-        updateCameraStreamPanelState(deviceId, (current) => ({
-          ...current,
-          viewerId,
-          transport: "webrtc",
-          mjpegUrl: null
-        }));
-
-        if (joinedState.includeAudio) {
-          window.setTimeout(() => {
-            const currentState = getCameraStreamState(deviceId);
-            if (currentState.viewerId !== viewerId || currentState.transport !== "webrtc") {
-              return;
-            }
-            const currentRemoteStream = remoteStreamsRef.current[deviceId];
-            const hasAudioTrack =
-              (currentRemoteStream?.getAudioTracks().length ?? 0) > 0;
-            if (hasAudioTrack) {
-              return;
-            }
-            switchToMjpegFallback(deviceId, viewerId, true);
-            setError(
-              "WebRTC connected but no remote audio track arrived. Switched to MJPEG video with PCM fallback audio."
-            );
-          }, 4_000);
-        }
-      }
-
-      if (
-        connection.connectionState === "failed" ||
-        connection.connectionState === "disconnected" ||
-        connection.connectionState === "closed"
-      ) {
-        switchToMjpegFallback(deviceId, viewerId, joinedState.includeAudio);
-        if (joinedState.includeAudio) {
-          setError(
-            "WebRTC audio could not stay connected. Switched to MJPEG video with PCM fallback audio."
-          );
-        }
-      }
-    };
-
-    connection.addTransceiver("video", { direction: "recvonly" });
-    if (joinedState.includeAudio) {
-      connection.addTransceiver("audio", { direction: "recvonly" });
-    }
-
-    const offer = await connection.createOffer();
-    await connection.setLocalDescription(offer);
-    socket.emit("camera.viewer.signal", {
-      deviceId,
-      viewerId,
-      signal: {
-        type: "offer",
-        sdp: offer.sdp
-      }
-    });
-
-    updateCameraStreamPanelState(deviceId, (current) => ({
-      ...current,
-      viewerId,
-      transport: null,
-      mjpegUrl: null
-    }));
-
-    viewerTimeoutsRef.current[deviceId] = window.setTimeout(() => {
-      const currentState = getCameraStreamState(deviceId);
-      if (currentState.viewerId === viewerId && currentState.transport !== "webrtc") {
-        switchToMjpegFallback(deviceId, viewerId, joinedState.includeAudio);
-        if (joinedState.includeAudio) {
-          setError(
-            "WebRTC audio negotiation timed out. Switched to MJPEG video with PCM fallback audio."
-          );
-        }
-      }
-    }, 24_000);
-  }
-
   async function connectMjpegViewer(
     deviceId: string,
     sessionState: CameraStreamSessionState
@@ -1569,10 +1507,10 @@ export function DashboardShell() {
 
   async function refreshNotificationsFromDevice(deviceId: string) {
     setError(null);
-    setCommandingDeviceId(deviceId);
+    setCommandingDeviceAction({ deviceId, action: "notifications" });
 
     try {
-      await apiRequest(`/devices/${deviceId}/commands`, {
+      const command = await apiRequest<DeviceCommandView>(`/devices/${deviceId}/commands`, {
         method: "POST",
         accessToken,
         body: {
@@ -1580,13 +1518,8 @@ export function DashboardShell() {
           payload: { reason: "dashboard_refresh_notifications" }
         } satisfies CreateDeviceCommandRequest
       });
-      [2_500, 5_000, 8_000, 15_000, 30_000].forEach((delayMs) => {
-        window.setTimeout(() => {
-          loadNotifications(deviceId).catch(() => {
-            // Surface through normal loadNotifications error handling.
-          });
-        }, delayMs);
-      });
+      await waitForDeviceCommand(deviceId, command.id);
+      await loadNotifications(deviceId);
     } catch (commandError) {
       setError(
         commandError instanceof Error
@@ -1594,16 +1527,16 @@ export function DashboardShell() {
           : "Could not refresh notifications from the device."
       );
     } finally {
-      setCommandingDeviceId(null);
+      setCommandingDeviceAction(null);
     }
   }
 
   async function refreshCallLogsFromDevice(deviceId: string) {
     setError(null);
-    setCommandingDeviceId(deviceId);
+    setCommandingDeviceAction({ deviceId, action: "callLogs" });
 
     try {
-      await apiRequest(`/devices/${deviceId}/commands`, {
+      const command = await apiRequest<DeviceCommandView>(`/devices/${deviceId}/commands`, {
         method: "POST",
         accessToken,
         body: {
@@ -1611,13 +1544,8 @@ export function DashboardShell() {
           payload: { reason: "dashboard_refresh_call_logs" }
         } satisfies CreateDeviceCommandRequest
       });
-      [2_500, 5_000, 8_000, 15_000, 30_000].forEach((delayMs) => {
-        window.setTimeout(() => {
-          loadCallLogs(deviceId).catch(() => {
-            // Surface through normal loadCallLogs error handling.
-          });
-        }, delayMs);
-      });
+      await waitForDeviceCommand(deviceId, command.id);
+      await loadCallLogs(deviceId);
     } catch (commandError) {
       setError(
         commandError instanceof Error
@@ -1625,13 +1553,95 @@ export function DashboardShell() {
           : "Could not refresh call logs from the device."
       );
     } finally {
-        setCommandingDeviceId(null);
+      setCommandingDeviceAction(null);
+    }
+  }
+
+  async function waitForDeviceCommand(deviceId: string, commandId: string) {
+    let latestCommand: DeviceCommandView | null = null;
+
+    for (let attempt = 0; attempt < 45; attempt += 1) {
+      if (attempt > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+      }
+
+      latestCommand = await apiRequest<DeviceCommandView>(
+        `/devices/${deviceId}/commands/${commandId}`,
+        {
+          accessToken,
+          timeoutMs: 8_000
+        }
+      );
+
+      if (latestCommand.status === "completed") {
+        return latestCommand;
+      }
+
+      if (latestCommand.status === "failed") {
+        throw new Error(latestCommand.lastError || "Device command failed.");
+      }
+    }
+
+    throw new Error(
+      latestCommand?.lastError ||
+        "Timed out waiting for the device to finish the command."
+    );
+  }
+
+  async function refreshCallRecordingsFromDevice(
+    deviceId: string,
+    options?: { append?: boolean }
+  ) {
+    setError(null);
+    setCommandingDeviceAction({ deviceId, action: "callRecordings" });
+
+    const append = options?.append ?? false;
+    const currentState = getCallRecordingsState(deviceId);
+    const offset = append ? currentState.items.length : 0;
+
+    if (!append) {
+      updateCallRecordingsState(deviceId, (state) => ({
+        ...state,
+        loaded: false,
+        items: [],
+        nextCursor: null,
+        selectedIds: []
+      }));
+    }
+
+    try {
+      const command = await apiRequest<DeviceCommandView>(
+        `/devices/${deviceId}/commands`,
+        {
+          method: "POST",
+          accessToken,
+          body: {
+            type: "device.refresh_call_recordings",
+            payload: {
+              reason: "dashboard_refresh_call_recordings",
+              recordingsOffset: offset,
+              recordingsLimit: 10
+            }
+          } satisfies CreateDeviceCommandRequest
+        }
+      );
+
+      await waitForDeviceCommand(deviceId, command.id);
+      await loadCallRecordings(deviceId, { append, cursor: append ? currentState.nextCursor : null });
+    } catch (commandError) {
+      setError(
+        commandError instanceof Error
+          ? commandError.message
+          : "Could not refresh call recordings from the device."
+      );
+    } finally {
+      setCommandingDeviceAction(null);
     }
   }
 
   async function startCameraStream(deviceId: string) {
     setError(null);
-    setCommandingDeviceId(deviceId);
+    setCommandingDeviceAction({ deviceId, action: "camera" });
 
     try {
       const currentState = getCameraStreamState(deviceId);
@@ -1649,11 +1659,6 @@ export function DashboardShell() {
       const preferredTransport = resolvePreferredCameraTransport(
         currentState.includeAudio
       );
-      if (currentState.includeAudio && preferredTransport !== "webrtc") {
-        setError(
-          "WebRTC native transport is disabled for stability. Starting MJPEG video with PCM fallback audio."
-        );
-      }
       const sessionState = await apiRequest<CameraStreamSessionState>(
         `/devices/${deviceId}/camera-stream/session`,
         {
@@ -1675,11 +1680,7 @@ export function DashboardShell() {
         mjpegUrl: null
       }));
       const readyState = await waitForCameraStreamReady(deviceId, sessionState);
-      if (readyState.preferredTransport === "mjpeg") {
-        await connectMjpegViewer(deviceId, readyState);
-      } else {
-        await connectCameraViewer(deviceId, readyState);
-      }
+      await connectMjpegViewer(deviceId, readyState);
 
       [500, 1_500, 3_000, 6_000].forEach((delayMs) => {
         window.setTimeout(() => {
@@ -1695,16 +1696,16 @@ export function DashboardShell() {
           : "Could not start the camera stream."
       );
     } finally {
-      setCommandingDeviceId(null);
+      setCommandingDeviceAction(null);
     }
   }
 
   async function stopCameraStream(deviceId: string) {
     setError(null);
-    setCommandingDeviceId(deviceId);
+    setCommandingDeviceAction({ deviceId, action: "camera" });
 
     try {
-      closeCameraViewer(deviceId);
+      closeCameraViewer(deviceId, true, true);
       await apiRequest(`/devices/${deviceId}/camera-stream/session`, {
         method: "DELETE",
         accessToken
@@ -1723,8 +1724,23 @@ export function DashboardShell() {
           : "Could not stop the camera stream."
       );
     } finally {
-      setCommandingDeviceId(null);
+      setCommandingDeviceAction(null);
     }
+  }
+
+  async function refreshCameraStream(deviceId: string) {
+    const currentState = getCameraStreamState(deviceId);
+    const hasActiveSession =
+      Boolean(currentState.session?.sessionId) &&
+      currentState.session?.status !== "idle" &&
+      currentState.session?.status !== "stopping";
+
+    if (hasActiveSession) {
+      await startCameraStream(deviceId);
+      return;
+    }
+
+    await loadCameraStream(deviceId);
   }
 
   async function sendDeviceCommand(
@@ -1732,7 +1748,7 @@ export function DashboardShell() {
     payload: CreateDeviceCommandRequest
   ) {
     setError(null);
-    setCommandingDeviceId(deviceId);
+    setCommandingDeviceAction({ deviceId, action: "telemetry" });
 
     try {
       await apiRequest(`/devices/${deviceId}/commands`, {
@@ -1756,7 +1772,7 @@ export function DashboardShell() {
           : "Could not send the device command."
       );
     } finally {
-      setCommandingDeviceId(null);
+      setCommandingDeviceAction(null);
     }
   }
 
@@ -1811,6 +1827,128 @@ export function DashboardShell() {
       );
     } finally {
       setClearingCallLogsDeviceId(null);
+    }
+  }
+
+  async function clearCallRecordings(deviceId: string) {
+    setError(null);
+    setClearingCallRecordingsDeviceId(deviceId);
+
+    try {
+      await apiRequest<{ success: boolean }>(`/devices/${deviceId}/call-recordings`, {
+        method: "DELETE",
+        accessToken
+      });
+      setCallRecordingsByDevice((current) => ({
+        ...current,
+        [deviceId]: {
+          ...EMPTY_CALL_RECORDINGS_STATE,
+          loaded: true
+        }
+      }));
+    } catch (clearError) {
+      setError(
+        clearError instanceof Error
+          ? clearError.message
+          : "Could not clear call recordings."
+      );
+    } finally {
+      setClearingCallRecordingsDeviceId(null);
+    }
+  }
+
+  function toggleCallRecordingSelection(deviceId: string, recordingId: string) {
+    updateCallRecordingsState(deviceId, (state) => {
+      const selected = new Set(state.selectedIds);
+      if (selected.has(recordingId)) {
+        selected.delete(recordingId);
+      } else {
+        selected.add(recordingId);
+      }
+
+      return {
+        ...state,
+        selectedIds: [...selected]
+      };
+    });
+  }
+
+  function toggleSelectAllCallRecordings(deviceId: string) {
+    updateCallRecordingsState(deviceId, (state) => {
+      const itemIds = state.items.map((item) => item.id);
+      const allSelected = itemIds.length > 0 && itemIds.every((id) => state.selectedIds.includes(id));
+
+      return {
+        ...state,
+        selectedIds: allSelected ? [] : itemIds
+      };
+    });
+  }
+
+  async function downloadSelectedCallRecordings(deviceId: string) {
+    const state = getCallRecordingsState(deviceId);
+    if (!state.selectedIds.length) {
+      return;
+    }
+
+    setError(null);
+    updateCallRecordingsState(deviceId, (current) => ({
+      ...current,
+      downloading: true
+    }));
+
+    try {
+      const response = await apiRequest<{
+        files: Array<{
+          id: string;
+          fileName: string;
+          mimeType: string;
+          capturedAt: string;
+          contentBase64: string;
+        }>;
+      }>(`/devices/${deviceId}/call-recordings/download`, {
+        method: "POST",
+        accessToken,
+        body: { ids: state.selectedIds }
+      });
+
+      if (!response.files.length) {
+        throw new Error("Selected recordings are no longer available.");
+      }
+
+      const archiveEntries = response.files.map((file, index) => {
+        const extension = deriveAudioExtension(file.fileName, file.mimeType);
+        const safeFileName = sanitizeDownloadFileName(file.fileName, extension, index + 1);
+        return {
+          fileName: safeFileName,
+          bytes: decodeBase64ToBytes(file.contentBase64)
+        };
+      });
+
+      const zipBlob = createSimpleZipBlob(archiveEntries);
+      const firstDevice = devices.find((item) => item.id === deviceId);
+      const deviceSlug = sanitizeSlug(firstDevice?.name || "device");
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const fileName = `${deviceSlug}-call-recordings-${timestamp}.zip`;
+      const url = URL.createObjectURL(zipBlob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = fileName;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (downloadError) {
+      setError(
+        downloadError instanceof Error
+          ? downloadError.message
+          : "Could not download selected call recordings."
+      );
+    } finally {
+      updateCallRecordingsState(deviceId, (current) => ({
+        ...current,
+        downloading: false
+      }));
     }
   }
 
@@ -2061,15 +2199,15 @@ export function DashboardShell() {
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                       <button
                         className="button-secondary"
-                        disabled={commandingDeviceId === device.id}
+                        disabled={isCommandingDeviceAction(device.id, "camera")}
                         onClick={() => startCameraStream(device.id)}
                         type="button"
                       >
-                        {commandingDeviceId === device.id ? "Starting..." : "Start stream"}
+                        {isCommandingDeviceAction(device.id, "camera") ? "Starting..." : "Start stream"}
                       </button>
                       <button
                         className="button-secondary"
-                        disabled={commandingDeviceId === device.id}
+                        disabled={isCommandingDeviceAction(device.id, "camera")}
                         onClick={() => stopCameraStream(device.id)}
                         type="button"
                       >
@@ -2077,11 +2215,13 @@ export function DashboardShell() {
                       </button>
                       <button
                         className="button-secondary"
-                        disabled={cameraStream.loading}
-                        onClick={() => loadCameraStream(device.id)}
+                        disabled={cameraStream.loading || isCommandingDeviceAction(device.id, "camera")}
+                        onClick={() => refreshCameraStream(device.id)}
                         type="button"
                       >
-                        {cameraStream.loading ? "Refreshing..." : "Refresh stream"}
+                        {cameraStream.loading || isCommandingDeviceAction(device.id, "camera")
+                          ? "Refreshing..."
+                          : "Refresh stream"}
                       </button>
                     </div>
 
@@ -2100,14 +2240,12 @@ export function DashboardShell() {
                       </div>
                       {cameraStream.transport ? (
                         <div className="pill">
-                          {cameraStream.transport === "webrtc"
-                            ? "WebRTC"
-                            : "MJPEG fallback"}
+                          MJPEG
                         </div>
                       ) : null}
                       {streamState?.activeTransport ? (
                         <div className="pill">
-                          Active {streamState.activeTransport === "webrtc" ? "WebRTC" : "MJPEG"}
+                          Active MJPEG
                         </div>
                       ) : null}
                       {cameraStream.audioFallbackActive ? (
@@ -2130,38 +2268,19 @@ export function DashboardShell() {
                       ) : null}
                     </div>
 
-                    {cameraStream.transport === "webrtc" ? (
+                    {showMjpeg ? (
                       <div
                         className="camera-feed-shell"
-                      >
-                        <div className="pill">Live feed frame</div>
-                        <div className="camera-feed-stage">
-                        <video
-                          autoPlay
-                          controls={effectiveIncludeAudio}
-                          muted={!effectiveIncludeAudio}
-                          onClick={(event) => {
-                            if (!effectiveIncludeAudio) {
-                              return;
-                            }
-                            const element = event.currentTarget;
-                            element.muted = false;
-                            void element.play().catch(() => {
-                              setError(
-                                "Audio playback is blocked by the browser. Use the video controls to unmute and play."
-                              );
-                            });
-                          }}
-                          playsInline
-                          ref={(element) => setCameraVideoElement(device.id, element)}
-                          className="camera-feed-media"
-                          style={{ transform: `rotate(${cameraRotationDegrees}deg)` }}
-                        />
-                        </div>
-                      </div>
-                    ) : showMjpeg ? (
-                      <div
-                        className="camera-feed-shell"
+                        onClick={() => {
+                          if (!effectiveIncludeAudio) {
+                            return;
+                          }
+                          void ensureAudioContext(device.id).catch(() => {
+                            setError(
+                              "Audio playback is blocked by the browser. Click Start stream again or allow audio playback for this site."
+                            );
+                          });
+                        }}
                       >
                         <div className="pill">Live feed frame</div>
                         <div className="camera-feed-stage">
@@ -2188,7 +2307,7 @@ export function DashboardShell() {
 
                     <div style={{ display: "grid", gap: 6 }}>
                       <p className="muted" style={{ margin: 0 }}>
-                        Preferred transport {streamState?.preferredTransport ?? "webrtc"}
+                        Preferred transport {streamState?.preferredTransport ?? "mjpeg"}
                       </p>
                       <p className="muted" style={{ margin: 0 }}>
                         {streamState?.updatedAt
@@ -2204,11 +2323,9 @@ export function DashboardShell() {
                           : "off"}
                       </p>
                       <p className="muted" style={{ margin: 0 }}>
-                        {cameraStream.transport === "webrtc"
-                          ? "Audio path: WebRTC track."
-                          : cameraStream.audioFallbackActive
-                            ? "Audio path: PCM fallback over MJPEG session."
-                            : "Audio path: waiting for fallback chunks."}
+                        {cameraStream.audioFallbackActive
+                          ? "Audio path: PCM fallback over MJPEG session."
+                          : "Audio path: waiting for fallback chunks."}
                       </p>
                       {cameraStream.audioFallbackLastChunkAt ? (
                         <p className="muted" style={{ margin: 0 }}>
@@ -2236,6 +2353,203 @@ export function DashboardShell() {
           ) : (
             <p className="muted" style={{ margin: 0 }}>
               Pair a device first to use the camera stream.
+            </p>
+          )}
+        </section>
+
+        <section
+          className="glass-panel"
+          style={{ borderRadius: "32px", padding: 28, display: "grid", gap: 18 }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 12,
+              flexWrap: "wrap",
+              alignItems: "center"
+            }}
+          >
+            <div>
+              <div className="pill" style={{ marginBottom: 8 }}>
+                Call recordings
+              </div>
+              <p className="muted" style={{ margin: 0 }}>
+                Pull, preview, and download call recordings in pages from latest to oldest.
+              </p>
+            </div>
+          </div>
+          {devices.length ? (
+            <div className="card-grid">
+              {devices.map((device) => {
+                const recordingsState = getCallRecordingsState(device.id);
+                const allSelected =
+                  recordingsState.items.length > 0 &&
+                  recordingsState.items.every((item) =>
+                    recordingsState.selectedIds.includes(item.id)
+                  );
+
+                return (
+                  <article
+                    key={`call-recordings-${device.id}`}
+                    style={{
+                      padding: 18,
+                      borderRadius: 24,
+                      background: "rgba(255,255,255,0.74)",
+                      border: "1px solid var(--line)",
+                      display: "grid",
+                      gap: 12
+                    }}
+                  >
+                    <div>
+                      <h3 style={{ margin: "0 0 4px" }}>{device.name}</h3>
+                      <p className="muted" style={{ margin: 0 }}>
+                        {device.manufacturer} {device.model}
+                      </p>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      <button
+                        className="button-secondary"
+                        disabled={recordingsState.loading || isCommandingDeviceAction(device.id, "callRecordings")}
+                        onClick={() => refreshCallRecordingsFromDevice(device.id)}
+                        type="button"
+                      >
+                        {isCommandingDeviceAction(device.id, "callRecordings")
+                          ? "Pulling..."
+                          : recordingsState.loaded
+                            ? "Refresh latest 10"
+                            : "Load call recordings"}
+                      </button>
+                      <button
+                        className="button-secondary"
+                        disabled={
+                          recordingsState.loading ||
+                          isCommandingDeviceAction(device.id, "callRecordings") ||
+                          !recordingsState.items.length
+                        }
+                        onClick={() => refreshCallRecordingsFromDevice(device.id, { append: true })}
+                        type="button"
+                      >
+                        {recordingsState.loading ? "Loading..." : "Load previous 10"}
+                      </button>
+                      <button
+                        className="button-secondary"
+                        disabled={!recordingsState.items.length}
+                        onClick={() => toggleSelectAllCallRecordings(device.id)}
+                        type="button"
+                      >
+                        {allSelected ? "Unselect all" : "Select all"}
+                      </button>
+                      <button
+                        className="button-secondary"
+                        disabled={!recordingsState.selectedIds.length || recordingsState.downloading}
+                        onClick={() => downloadSelectedCallRecordings(device.id)}
+                        type="button"
+                      >
+                        {recordingsState.downloading
+                          ? "Preparing zip..."
+                          : `Download selected (${recordingsState.selectedIds.length})`}
+                      </button>
+                      <button
+                        className="button-secondary"
+                        disabled={clearingCallRecordingsDeviceId === device.id}
+                        onClick={() => clearCallRecordings(device.id)}
+                        type="button"
+                      >
+                        {clearingCallRecordingsDeviceId === device.id
+                          ? "Clearing..."
+                          : "Clear recordings"}
+                      </button>
+                      <div className="pill">{recordingsState.items.length} loaded</div>
+                    </div>
+
+                    {recordingsState.loaded || recordingsState.loading ? (
+                      <>
+                        {recordingsState.loading && !recordingsState.items.length ? (
+                          <p className="muted" style={{ margin: 0 }}>
+                            Loading call recordings...
+                          </p>
+                        ) : null}
+
+                        {!recordingsState.loading && !recordingsState.items.length ? (
+                          <p className="muted" style={{ margin: 0 }}>
+                            No call recordings synced for this device yet.
+                          </p>
+                        ) : null}
+
+                        <div style={{ display: "grid", gap: 10 }}>
+                          {recordingsState.items.map((recording) => {
+                            const selected = recordingsState.selectedIds.includes(recording.id);
+                            const audioUrl =
+                              `data:${recording.mimeType};base64,${recording.contentBase64}`;
+
+                            return (
+                              <article
+                                key={recording.id}
+                                style={{
+                                  padding: 12,
+                                  borderRadius: 14,
+                                  background: "rgba(255,255,255,0.72)",
+                                  border: "1px solid rgba(29,36,48,0.08)",
+                                  display: "grid",
+                                  gap: 8
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    gap: 10,
+                                    flexWrap: "wrap",
+                                    alignItems: "center"
+                                  }}
+                                >
+                                  <label
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 8,
+                                      cursor: "pointer"
+                                    }}
+                                  >
+                                    <input
+                                      checked={selected}
+                                      onChange={() =>
+                                        toggleCallRecordingSelection(device.id, recording.id)
+                                      }
+                                      type="checkbox"
+                                    />
+                                    <strong>{recording.fileName}</strong>
+                                  </label>
+                                  <span className="muted" style={{ fontSize: 13 }}>
+                                    {new Date(recording.capturedAt).toLocaleString()}
+                                  </span>
+                                </div>
+                                <p className="muted" style={{ margin: 0 }}>
+                                  {recording.source.toUpperCase()} • {formatBytes(recording.byteSize)}
+                                </p>
+                                <p className="muted" style={{ margin: 0 }}>
+                                  {recording.relativePath}
+                                </p>
+                                <audio controls preload="none" src={audioUrl} />
+                              </article>
+                            );
+                          })}
+                        </div>
+                      </>
+                    ) : (
+                      <p className="muted" style={{ margin: 0 }}>
+                        Pull call recordings when you want to review this device.
+                      </p>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="muted" style={{ margin: 0 }}>
+              Pair a device first to review and download call recordings.
             </p>
           )}
         </section>
@@ -2330,11 +2644,11 @@ export function DashboardShell() {
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                     <button
                       className="button-secondary"
-                      disabled={commandingDeviceId === device.id}
+                      disabled={isCommandingDeviceAction(device.id, "telemetry")}
                       onClick={() => loadTelemetry(device.id)}
                       type="button"
                     >
-                      {commandingDeviceId === device.id ? "Working..." : "Load device details"}
+                      {isCommandingDeviceAction(device.id, "telemetry") ? "Working..." : "Load device details"}
                     </button>
                     <button
                       className="button-secondary"
@@ -2393,7 +2707,7 @@ export function DashboardShell() {
                         </div>
                         <button
                           className="button-secondary"
-                          disabled={commandingDeviceId === device.id}
+                          disabled={isCommandingDeviceAction(device.id, "telemetry")}
                           onClick={() =>
                             sendDeviceCommand(device.id, {
                               type: "device.refresh_info",
@@ -2402,11 +2716,11 @@ export function DashboardShell() {
                           }
                           type="button"
                         >
-                          {commandingDeviceId === device.id ? "Sending..." : "Refresh info now"}
+                          {isCommandingDeviceAction(device.id, "telemetry") ? "Sending..." : "Refresh info now"}
                         </button>
                         <button
                           className="button-secondary"
-                          disabled={commandingDeviceId === device.id}
+                          disabled={isCommandingDeviceAction(device.id, "telemetry")}
                           onClick={() =>
                             sendDeviceCommand(device.id, {
                               type: "device.get_location",
@@ -2672,11 +2986,11 @@ export function DashboardShell() {
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                       <button
                         className="button-secondary"
-                        disabled={callLogsState.loading || commandingDeviceId === device.id}
+                        disabled={callLogsState.loading || isCommandingDeviceAction(device.id, "callLogs")}
                         onClick={() => refreshCallLogsFromDevice(device.id)}
                         type="button"
                       >
-                        {commandingDeviceId === device.id
+                        {isCommandingDeviceAction(device.id, "callLogs")
                           ? "Pulling..."
                           : callLogsState.loaded
                             ? "Refresh call logs"
@@ -2826,12 +3140,12 @@ export function DashboardShell() {
                       <button
                         className="button-secondary"
                         disabled={
-                          notificationsState.loading || commandingDeviceId === device.id
+                          notificationsState.loading || isCommandingDeviceAction(device.id, "notifications")
                         }
                         onClick={() => refreshNotificationsFromDevice(device.id)}
                         type="button"
                       >
-                        {commandingDeviceId === device.id
+                        {isCommandingDeviceAction(device.id, "notifications")
                           ? "Pulling..."
                           : notificationsState.loaded
                             ? "Refresh notifications"
@@ -3117,6 +3431,167 @@ function formatDuration(totalSeconds: number) {
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
+function decodeBase64ToBytes(value: string) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function sanitizeSlug(value: string) {
+  const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return normalized || "device";
+}
+
+function sanitizeDownloadFileName(
+  fileName: string,
+  fallbackExtension: string,
+  index: number
+) {
+  const trimmed = fileName.trim();
+  const safeBase =
+    trimmed
+      .replace(/[\\/:*?"<>|]+/g, "_")
+      .replace(/\s+/g, " ")
+      .trim() || `recording-${index}`;
+
+  if (/\.[a-z0-9]{2,5}$/i.test(safeBase)) {
+    return safeBase;
+  }
+
+  return `${safeBase}.${fallbackExtension}`;
+}
+
+function deriveAudioExtension(fileName: string, mimeType: string) {
+  const extensionFromName = fileName.split(".").at(-1)?.toLowerCase();
+  if (extensionFromName && /^[a-z0-9]{2,5}$/.test(extensionFromName)) {
+    return extensionFromName;
+  }
+
+  const normalizedMimeType = mimeType.toLowerCase();
+  if (normalizedMimeType.includes("mpeg")) {
+    return "mp3";
+  }
+  if (normalizedMimeType.includes("mp4")) {
+    return "m4a";
+  }
+  if (normalizedMimeType.includes("wav")) {
+    return "wav";
+  }
+  if (normalizedMimeType.includes("aac")) {
+    return "aac";
+  }
+  if (normalizedMimeType.includes("ogg")) {
+    return "ogg";
+  }
+
+  return "audio";
+}
+
+function createSimpleZipBlob(entries: Array<{ fileName: string; bytes: Uint8Array }>) {
+  const localHeaders: Uint8Array[] = [];
+  const filePayloads: Uint8Array[] = [];
+  const centralHeaders: Uint8Array[] = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const fileNameBytes = new TextEncoder().encode(entry.fileName);
+    const crc = crc32(entry.bytes);
+    const size = entry.bytes.length;
+
+    const localHeader = new Uint8Array(30 + fileNameBytes.length);
+    const localView = new DataView(localHeader.buffer);
+    localView.setUint32(0, 0x04034b50, true);
+    localView.setUint16(4, 20, true);
+    localView.setUint16(6, 0, true);
+    localView.setUint16(8, 0, true);
+    localView.setUint16(10, 0, true);
+    localView.setUint16(12, 0, true);
+    localView.setUint32(14, crc, true);
+    localView.setUint32(18, size, true);
+    localView.setUint32(22, size, true);
+    localView.setUint16(26, fileNameBytes.length, true);
+    localView.setUint16(28, 0, true);
+    localHeader.set(fileNameBytes, 30);
+
+    const centralHeader = new Uint8Array(46 + fileNameBytes.length);
+    const centralView = new DataView(centralHeader.buffer);
+    centralView.setUint32(0, 0x02014b50, true);
+    centralView.setUint16(4, 20, true);
+    centralView.setUint16(6, 20, true);
+    centralView.setUint16(8, 0, true);
+    centralView.setUint16(10, 0, true);
+    centralView.setUint16(12, 0, true);
+    centralView.setUint16(14, 0, true);
+    centralView.setUint32(16, crc, true);
+    centralView.setUint32(20, size, true);
+    centralView.setUint32(24, size, true);
+    centralView.setUint16(28, fileNameBytes.length, true);
+    centralView.setUint16(30, 0, true);
+    centralView.setUint16(32, 0, true);
+    centralView.setUint16(34, 0, true);
+    centralView.setUint16(36, 0, true);
+    centralView.setUint32(38, 0, true);
+    centralView.setUint32(42, offset, true);
+    centralHeader.set(fileNameBytes, 46);
+
+    localHeaders.push(localHeader);
+    filePayloads.push(entry.bytes);
+    centralHeaders.push(centralHeader);
+    offset += localHeader.length + entry.bytes.length;
+  }
+
+  const centralDirectorySize = centralHeaders.reduce((sum, header) => sum + header.length, 0);
+  const endOfCentral = new Uint8Array(22);
+  const endView = new DataView(endOfCentral.buffer);
+  endView.setUint32(0, 0x06054b50, true);
+  endView.setUint16(4, 0, true);
+  endView.setUint16(6, 0, true);
+  endView.setUint16(8, entries.length, true);
+  endView.setUint16(10, entries.length, true);
+  endView.setUint32(12, centralDirectorySize, true);
+  endView.setUint32(16, offset, true);
+  endView.setUint16(20, 0, true);
+
+  const chunks: BlobPart[] = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const localHeader = localHeaders[index];
+    const payload = filePayloads[index];
+    if (localHeader) {
+      chunks.push(uint8ToBlobPart(localHeader));
+    }
+    if (payload) {
+      chunks.push(uint8ToBlobPart(payload));
+    }
+  }
+  for (const header of centralHeaders) {
+    chunks.push(uint8ToBlobPart(header));
+  }
+  chunks.push(uint8ToBlobPart(endOfCentral));
+
+  return new Blob(chunks, { type: "application/zip" });
+}
+
+function crc32(bytes: Uint8Array) {
+  let crc = 0xffffffff;
+  for (let index = 0; index < bytes.length; index += 1) {
+    crc ^= bytes[index] ?? 0;
+    for (let bit = 0; bit < 8; bit += 1) {
+      const lsb = crc & 1;
+      crc = (crc >>> 1) ^ (lsb ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function uint8ToBlobPart(bytes: Uint8Array): BlobPart {
+  const copy = new Uint8Array(bytes.length);
+  copy.set(bytes);
+  return copy.buffer as BlobPart;
+}
+
 function showDisabledLocationState(telemetry: DeviceTelemetryState) {
   return (
     !telemetry.locationReportingEnabled ||
@@ -3243,3 +3718,6 @@ function normalizeNotificationPart(value: string) {
     .trim()
     .toLowerCase();
 }
+
+
+

@@ -95,7 +95,6 @@ class DeviceSyncStore(application: Application) {
             return
         }
         database.notificationRecordDao().markSynced(clientIds, syncedAt)
-        database.notificationRecordDao().deleteSynced()
     }
 
     suspend fun enqueueCallLog(record: CallLogRecordDto) {

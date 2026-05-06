@@ -7,6 +7,7 @@ import { AuditModule } from "./modules/audit/audit.module";
 import { AuthModule } from "./modules/auth/auth.module";
 import { CameraStreamModule } from "./modules/camera-stream/camera-stream.module";
 import { CallLogsModule } from "./modules/call-logs/call-logs.module";
+import { CallRecordingsModule } from "./modules/call-recordings/call-recordings.module";
 import { DevicesModule } from "./modules/devices/devices.module";
 import { DeviceRuntimeModule } from "./modules/device-runtime/device-runtime.module";
 import { DeviceTelemetryModule } from "./modules/device-telemetry/device-telemetry.module";
@@ -19,6 +20,7 @@ import { WorkspacesModule } from "./modules/workspaces/workspaces.module";
 @Module({
   imports: [
     ConfigModule.forRoot({
+      envFilePath: [".env", "apps/api/.env"],
       isGlobal: true
     }),
     CoreModule,
@@ -27,6 +29,7 @@ import { WorkspacesModule } from "./modules/workspaces/workspaces.module";
     AuditModule,
     CameraStreamModule,
     CallLogsModule,
+    CallRecordingsModule,
     RealtimeModule,
     AuthModule,
     DevicesModule,

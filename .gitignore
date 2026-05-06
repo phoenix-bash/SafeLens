@@ -8,7 +8,6 @@ coverage
 build
 out
 *.log
-.env
 .env.local
 apps/android/local.properties
 *.jks

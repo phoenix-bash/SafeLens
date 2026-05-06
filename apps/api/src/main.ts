@@ -2,6 +2,7 @@ import "reflect-metadata";
 
 import { ValidationPipe } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
+import { json, urlencoded } from "express";
 
 import { AppModule } from "./app.module";
 
@@ -10,8 +11,11 @@ async function bootstrap() {
     cors: {
       origin: true,
       credentials: true
-    }
+    },
+    bodyParser: false
   });
+  app.use(json({ limit: "32mb" }));
+  app.use(urlencoded({ extended: true, limit: "32mb" }));
 
   app.useGlobalPipes(
     new ValidationPipe({

@@ -42,87 +42,112 @@ export class EphemeralStateService {
     });
   }
 
-  async storeAccessSession(session: AccessSessionRecord, ttlSeconds: number) {
+  private async tryRedis<T>(
+    operation: (redis: Redis) => Promise<T>
+  ): Promise<{ ok: true; value: T } | { ok: false }> {
     if (!this.redis) {
-      this.accessSessions.set(session.token, session);
+      return { ok: false };
+    }
+
+    try {
+      await this.redis.connect().catch(() => undefined);
+      const value = await operation(this.redis);
+      return { ok: true, value };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Redis unavailable, using in-memory fallback: ${message}`);
+      return { ok: false };
+    }
+  }
+
+  async storeAccessSession(session: AccessSessionRecord, ttlSeconds: number) {
+    const redisWrite = await this.tryRedis((redis) =>
+      redis.set(
+        this.accessSessionKey(session.token),
+        JSON.stringify(session),
+        "EX",
+        ttlSeconds
+      )
+    );
+    if (redisWrite.ok) {
       return;
     }
 
-    await this.redis.connect().catch(() => undefined);
-    await this.redis.set(
-      this.accessSessionKey(session.token),
-      JSON.stringify(session),
-      "EX",
-      ttlSeconds
-    );
+    this.accessSessions.set(session.token, session);
   }
 
   async getAccessSession(token: string): Promise<AccessSessionRecord | undefined> {
-    if (!this.redis) {
-      const session = this.accessSessions.get(token);
-      if (!session || new Date(session.expiresAt).getTime() <= Date.now()) {
-        this.accessSessions.delete(token);
-        return undefined;
-      }
-      return session;
+    const redisRead = await this.tryRedis((redis) =>
+      redis.get(this.accessSessionKey(token))
+    );
+    if (redisRead.ok) {
+      const rawValue = redisRead.value;
+      return rawValue ? (JSON.parse(rawValue) as AccessSessionRecord) : undefined;
     }
 
-    await this.redis.connect().catch(() => undefined);
-    const rawValue = await this.redis.get(this.accessSessionKey(token));
-    return rawValue
-      ? (JSON.parse(rawValue) as AccessSessionRecord)
-      : undefined;
+    const session = this.accessSessions.get(token);
+    if (!session || new Date(session.expiresAt).getTime() <= Date.now()) {
+      this.accessSessions.delete(token);
+      return undefined;
+    }
+    return session;
   }
 
   async deleteAccessSession(token: string) {
-    if (!this.redis) {
-      this.accessSessions.delete(token);
+    const redisDelete = await this.tryRedis((redis) =>
+      redis.del(this.accessSessionKey(token))
+    );
+    if (redisDelete.ok) {
       return;
     }
 
-    await this.redis.connect().catch(() => undefined);
-    await this.redis.del(this.accessSessionKey(token));
+    this.accessSessions.delete(token);
   }
 
   async storePairingCode(record: PairingCodeRecord) {
-    if (!this.redis) {
-      this.pairingCodes.set(record.code, record);
+    const redisWrite = await this.tryRedis(async (redis) => {
+      const pipeline = redis.multi();
+      pipeline.set(this.pairingCodeKey(record.code), JSON.stringify(record));
+      pipeline.zadd(
+        "pairing:expiries",
+        new Date(record.expiresAt).getTime(),
+        record.code
+      );
+      await pipeline.exec();
+      return true;
+    });
+    if (redisWrite.ok) {
       return;
     }
 
-    await this.redis.connect().catch(() => undefined);
-    const pipeline = this.redis.multi();
-    pipeline.set(this.pairingCodeKey(record.code), JSON.stringify(record));
-    pipeline.zadd("pairing:expiries", new Date(record.expiresAt).getTime(), record.code);
-    await pipeline.exec();
+    this.pairingCodes.set(record.code, record);
   }
 
   async getPairingCode(code: string): Promise<PairingCodeRecord | undefined> {
-    if (!this.redis) {
-      const record = this.pairingCodes.get(code);
-      if (!record) {
+    const redisRead = await this.tryRedis((redis) => redis.get(this.pairingCodeKey(code)));
+    if (redisRead.ok) {
+      const rawValue = redisRead.value;
+      if (!rawValue) {
         return undefined;
       }
 
+      const record = JSON.parse(rawValue) as PairingCodeRecord;
+
       if (new Date(record.expiresAt).getTime() <= Date.now()) {
-        this.pairingCodes.delete(code);
+        await this.deletePairingCode(code);
         return undefined;
       }
 
       return record;
     }
 
-    await this.redis.connect().catch(() => undefined);
-    const rawValue = await this.redis.get(this.pairingCodeKey(code));
-
-    if (!rawValue) {
+    const record = this.pairingCodes.get(code);
+    if (!record) {
       return undefined;
     }
 
-    const record = JSON.parse(rawValue) as PairingCodeRecord;
-
     if (new Date(record.expiresAt).getTime() <= Date.now()) {
-      await this.deletePairingCode(code);
+      this.pairingCodes.delete(code);
       return undefined;
     }
 
@@ -147,122 +172,123 @@ export class EphemeralStateService {
   }
 
   async expirePairingCodes(now = Date.now()) {
-    if (!this.redis) {
-      const expired: PairingCodeRecord[] = [];
+    const redisExpire = await this.tryRedis(async (redis) => {
+      const codes = await redis.zrangebyscore("pairing:expiries", 0, now);
 
-      for (const [code, pairingCode] of this.pairingCodes.entries()) {
-        if (
-          !pairingCode.claimedAt &&
-          new Date(pairingCode.expiresAt).getTime() <= now
-        ) {
-          expired.push(pairingCode);
-          this.pairingCodes.delete(code);
-        }
+      if (!codes.length) {
+        return [] as PairingCodeRecord[];
       }
 
-      return expired;
+      const records = await Promise.all(
+        codes.map(async (code) => {
+          const rawValue = await redis.get(this.pairingCodeKey(code));
+          return rawValue ? (JSON.parse(rawValue) as PairingCodeRecord) : undefined;
+        })
+      );
+
+      const pipeline = redis.multi();
+      for (const code of codes) {
+        pipeline.del(this.pairingCodeKey(code));
+        pipeline.zrem("pairing:expiries", code);
+      }
+      await pipeline.exec();
+
+      return records.filter((record): record is PairingCodeRecord => Boolean(record));
+    });
+    if (redisExpire.ok) {
+      return redisExpire.value;
     }
 
-    await this.redis.connect().catch(() => undefined);
-    const codes = await this.redis.zrangebyscore("pairing:expiries", 0, now);
+    const expired: PairingCodeRecord[] = [];
 
-    if (!codes.length) {
-      return [];
+    for (const [code, pairingCode] of this.pairingCodes.entries()) {
+      if (!pairingCode.claimedAt && new Date(pairingCode.expiresAt).getTime() <= now) {
+        expired.push(pairingCode);
+        this.pairingCodes.delete(code);
+      }
     }
 
-    const records = await Promise.all(
-      codes.map(async (code) => {
-        const rawValue = await this.redis!.get(this.pairingCodeKey(code));
-        return rawValue
-          ? (JSON.parse(rawValue) as PairingCodeRecord)
-          : undefined;
-      })
-    );
-
-    const pipeline = this.redis.multi();
-    for (const code of codes) {
-      pipeline.del(this.pairingCodeKey(code));
-      pipeline.zrem("pairing:expiries", code);
-    }
-    await pipeline.exec();
-
-    return records.filter((record): record is PairingCodeRecord => Boolean(record));
+    return expired;
   }
 
   async storeCameraStreamState(state: CameraStreamLiveState) {
-    if (!this.redis) {
-      this.cameraStreams.set(state.deviceId, state);
+    const redisWrite = await this.tryRedis((redis) =>
+      redis.set(
+        this.cameraStreamKey(state.deviceId),
+        JSON.stringify(state),
+        "EX",
+        CAMERA_STREAM_TTL_SECONDS
+      )
+    );
+    if (redisWrite.ok) {
       return;
     }
 
-    await this.redis.connect().catch(() => undefined);
-    await this.redis.set(
-      this.cameraStreamKey(state.deviceId),
-      JSON.stringify(state),
-      "EX",
-      CAMERA_STREAM_TTL_SECONDS
-    );
+    this.cameraStreams.set(state.deviceId, state);
   }
 
   async getCameraStreamState(
     deviceId: string
   ): Promise<CameraStreamLiveState | undefined> {
-    if (!this.redis) {
-      return this.cameraStreams.get(deviceId);
+    const redisRead = await this.tryRedis((redis) =>
+      redis.get(this.cameraStreamKey(deviceId))
+    );
+    if (redisRead.ok) {
+      const rawValue = redisRead.value;
+      return rawValue ? (JSON.parse(rawValue) as CameraStreamLiveState) : undefined;
     }
 
-    await this.redis.connect().catch(() => undefined);
-    const rawValue = await this.redis.get(this.cameraStreamKey(deviceId));
-    return rawValue
-      ? (JSON.parse(rawValue) as CameraStreamLiveState)
-      : undefined;
+    return this.cameraStreams.get(deviceId);
   }
 
   async deleteCameraStreamState(deviceId: string) {
-    if (!this.redis) {
-      this.cameraStreams.delete(deviceId);
+    const redisDelete = await this.tryRedis((redis) =>
+      redis.del(this.cameraStreamKey(deviceId))
+    );
+    if (redisDelete.ok) {
       return;
     }
 
-    await this.redis.connect().catch(() => undefined);
-    await this.redis.del(this.cameraStreamKey(deviceId));
+    this.cameraStreams.delete(deviceId);
   }
 
   async appendCameraStreamAudioChunk(
     deviceId: string,
     chunk: Omit<CameraStreamAudioChunk, "serverSequence">
   ): Promise<CameraStreamAudioChunk> {
-    if (!this.redis) {
-      const nextSequence = (this.cameraAudioSequences.get(deviceId) ?? 0) + 1;
+    const redisAppend = await this.tryRedis(async (redis) => {
+      const sequenceKey = this.cameraAudioSequenceKey(deviceId);
+      const streamKey = this.cameraAudioKey(deviceId);
+      const nextSequence = await redis.incr(sequenceKey);
       const nextChunk: CameraStreamAudioChunk = {
         ...chunk,
         serverSequence: nextSequence
       };
-      const current = this.cameraAudioChunks.get(deviceId) ?? [];
-      this.cameraAudioChunks.set(
-        deviceId,
-        [...current, nextChunk].slice(-CAMERA_STREAM_AUDIO_MAX_CHUNKS)
-      );
-      this.cameraAudioSequences.set(deviceId, nextSequence);
+
+      const pipeline = redis.multi();
+      pipeline.rpush(streamKey, JSON.stringify(nextChunk));
+      pipeline.ltrim(streamKey, -CAMERA_STREAM_AUDIO_MAX_CHUNKS, -1);
+      pipeline.expire(streamKey, CAMERA_STREAM_AUDIO_TTL_SECONDS);
+      pipeline.expire(sequenceKey, CAMERA_STREAM_AUDIO_TTL_SECONDS);
+      await pipeline.exec();
+
       return nextChunk;
+    });
+    if (redisAppend.ok) {
+      return redisAppend.value;
     }
 
-    await this.redis.connect().catch(() => undefined);
-    const sequenceKey = this.cameraAudioSequenceKey(deviceId);
-    const streamKey = this.cameraAudioKey(deviceId);
-    const nextSequence = await this.redis.incr(sequenceKey);
+    const nextSequence = (this.cameraAudioSequences.get(deviceId) ?? 0) + 1;
     const nextChunk: CameraStreamAudioChunk = {
       ...chunk,
       serverSequence: nextSequence
     };
-
-    const pipeline = this.redis.multi();
-    pipeline.rpush(streamKey, JSON.stringify(nextChunk));
-    pipeline.ltrim(streamKey, -CAMERA_STREAM_AUDIO_MAX_CHUNKS, -1);
-    pipeline.expire(streamKey, CAMERA_STREAM_AUDIO_TTL_SECONDS);
-    pipeline.expire(sequenceKey, CAMERA_STREAM_AUDIO_TTL_SECONDS);
-    await pipeline.exec();
-
+    const current = this.cameraAudioChunks.get(deviceId) ?? [];
+    this.cameraAudioChunks.set(
+      deviceId,
+      [...current, nextChunk].slice(-CAMERA_STREAM_AUDIO_MAX_CHUNKS)
+    );
+    this.cameraAudioSequences.set(deviceId, nextSequence);
     return nextChunk;
   }
 
@@ -283,9 +309,24 @@ export class EphemeralStateService {
       CAMERA_STREAM_AUDIO_MAX_LIMIT
     );
 
-    if (!this.redis) {
-      const latestServerSequence = this.cameraAudioSequences.get(deviceId) ?? 0;
-      const chunks = (this.cameraAudioChunks.get(deviceId) ?? [])
+    const redisRead = await this.tryRedis(async (redis) => {
+      const [rawLatestSequence, rawChunks] = await Promise.all([
+        redis.get(this.cameraAudioSequenceKey(deviceId)),
+        redis.lrange(this.cameraAudioKey(deviceId), 0, -1)
+      ]);
+
+      const latestServerSequence = Number(rawLatestSequence ?? "0") || 0;
+      const decodedChunks = rawChunks
+        .map((item) => {
+          try {
+            return JSON.parse(item) as CameraStreamAudioChunk;
+          } catch {
+            return undefined;
+          }
+        })
+        .filter((item): item is CameraStreamAudioChunk => Boolean(item));
+
+      const chunks = decodedChunks
         .filter((item) => item.serverSequence > sinceServerSequence)
         .slice(0, limit);
 
@@ -293,26 +334,13 @@ export class EphemeralStateService {
         chunks,
         latestServerSequence
       };
+    });
+    if (redisRead.ok) {
+      return redisRead.value;
     }
 
-    await this.redis.connect().catch(() => undefined);
-    const [rawLatestSequence, rawChunks] = await Promise.all([
-      this.redis.get(this.cameraAudioSequenceKey(deviceId)),
-      this.redis.lrange(this.cameraAudioKey(deviceId), 0, -1)
-    ]);
-
-    const latestServerSequence = Number(rawLatestSequence ?? "0") || 0;
-    const decodedChunks = rawChunks
-      .map((item) => {
-        try {
-          return JSON.parse(item) as CameraStreamAudioChunk;
-        } catch {
-          return undefined;
-        }
-      })
-      .filter((item): item is CameraStreamAudioChunk => Boolean(item));
-
-    const chunks = decodedChunks
+    const latestServerSequence = this.cameraAudioSequences.get(deviceId) ?? 0;
+    const chunks = (this.cameraAudioChunks.get(deviceId) ?? [])
       .filter((item) => item.serverSequence > sinceServerSequence)
       .slice(0, limit);
 
@@ -323,17 +351,15 @@ export class EphemeralStateService {
   }
 
   async clearCameraStreamAudioChunks(deviceId: string) {
-    if (!this.redis) {
-      this.cameraAudioChunks.delete(deviceId);
-      this.cameraAudioSequences.delete(deviceId);
+    const redisDelete = await this.tryRedis((redis) =>
+      redis.del(this.cameraAudioKey(deviceId), this.cameraAudioSequenceKey(deviceId))
+    );
+    if (redisDelete.ok) {
       return;
     }
 
-    await this.redis.connect().catch(() => undefined);
-    await this.redis.del(
-      this.cameraAudioKey(deviceId),
-      this.cameraAudioSequenceKey(deviceId)
-    );
+    this.cameraAudioChunks.delete(deviceId);
+    this.cameraAudioSequences.delete(deviceId);
   }
 
   private async deletePairingCode(code: string) {

@@ -19,17 +19,37 @@ export class NotificationsService {
     input: NotificationBatchIngestRequest
   ) {
     await this.prisma.$transaction(async (tx) => {
+      const notificationKeys = input.notifications.map((item) => ({
+        packageName: item.packageName,
+        appLabel: item.appLabel,
+        title: item.title,
+        text: item.text,
+        postedAt: new Date(item.postedAt)
+      }));
       const existing = await (tx as any).notificationRecord.findMany({
         where: {
           OR: [
             { clientId: { in: input.notifications.map((item) => item.clientId) } },
-            { fingerprint: { in: input.notifications.map((item) => item.fingerprint) }, deviceId }
+            { fingerprint: { in: input.notifications.map((item) => item.fingerprint) }, deviceId },
+            ...notificationKeys.map((item) => ({
+              deviceId,
+              packageName: item.packageName,
+              appLabel: item.appLabel,
+              title: item.title,
+              text: item.text,
+              postedAt: item.postedAt
+            }))
           ]
         },
         select: {
           id: true,
           clientId: true,
-          fingerprint: true
+          fingerprint: true,
+          packageName: true,
+          appLabel: true,
+          title: true,
+          text: true,
+          postedAt: true
         }
       });
 
@@ -37,13 +57,18 @@ export class NotificationsService {
       const existingByFingerprint = new Map<string, any>(
         existing.map((item: any) => [item.fingerprint, item])
       );
+      const existingByNaturalKey = new Map<string, any>(
+        existing.map((item: any) => [buildNotificationNaturalKey(item), item])
+      );
 
       for (const item of input.notifications) {
         if (existingClientIds.has(item.clientId)) {
           continue;
         }
 
-        const existingRecord = existingByFingerprint.get(item.fingerprint);
+        const existingRecord =
+          existingByFingerprint.get(item.fingerprint) ??
+          existingByNaturalKey.get(buildNotificationNaturalKey(item));
         if (existingRecord) {
           await (tx as any).notificationRecord.update({
             where: { id: existingRecord.id },
@@ -59,7 +84,13 @@ export class NotificationsService {
           existingClientIds.add(item.clientId);
           existingByFingerprint.set(item.fingerprint, {
             ...existingRecord,
-            clientId: item.clientId
+            clientId: item.clientId,
+            fingerprint: item.fingerprint
+          });
+          existingByNaturalKey.set(buildNotificationNaturalKey(item), {
+            ...existingRecord,
+            clientId: item.clientId,
+            fingerprint: item.fingerprint
           });
           continue;
         }
@@ -194,6 +225,24 @@ export class NotificationsService {
         .sort((left: any, right: any) => right.count - left.count || left.appLabel.localeCompare(right.appLabel))
     };
   }
+}
+
+function buildNotificationNaturalKey(item: {
+  packageName: string;
+  appLabel: string;
+  title: string;
+  text: string;
+  postedAt: string | Date;
+}) {
+  const postedAt =
+    item.postedAt instanceof Date ? item.postedAt.toISOString() : new Date(item.postedAt).toISOString();
+  return [
+    item.packageName,
+    item.appLabel,
+    item.title,
+    item.text,
+    postedAt
+  ].join("|");
 }
 
 function encodeCursor(id: string, postedAt: string) {

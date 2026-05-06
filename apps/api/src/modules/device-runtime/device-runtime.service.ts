@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import {
   CreateDeviceCommandRequest,
   DeviceCommandAckRequest,
@@ -13,6 +14,7 @@ import { RealtimeService } from "../realtime/realtime.service";
 export class DeviceRuntimeService {
   constructor(
     private readonly prisma: PrismaService,
+    private readonly configService: ConfigService,
     private readonly auditService: AuditService,
     private readonly realtimeService: RealtimeService
   ) {}
@@ -24,6 +26,8 @@ export class DeviceRuntimeService {
   ): Promise<DeviceCommandView> {
     await this.requireWorkspaceDevice(workspaceId, deviceId);
 
+    const payload = this.resolveCommandPayload(input);
+
     const now = new Date();
     const command = await (this.prisma as any).deviceCommand.create({
       data: {
@@ -31,7 +35,7 @@ export class DeviceRuntimeService {
         workspaceId,
         type: input.type,
         status: "pending",
-        payload: input.payload,
+        payload,
         dispatchedAt: now
       }
     });
@@ -65,6 +69,46 @@ export class DeviceRuntimeService {
     return view;
   }
 
+  private resolveCommandPayload(input: CreateDeviceCommandRequest) {
+    if (input.type !== "device.refresh_call_recordings") {
+      return input.payload;
+    }
+
+    const xiaomiPaths = this.parsePathsEnv(
+      this.configService.get<string>("CALL_RECORDINGS_XIAOMI_PATHS")
+    );
+    const vivoPaths = this.parsePathsEnv(
+      this.configService.get<string>("CALL_RECORDINGS_VIVO_PATHS")
+    );
+
+    return {
+      ...input.payload,
+      recordingsOffset: input.payload.recordingsOffset ?? 0,
+      recordingsLimit: input.payload.recordingsLimit ?? 10,
+      xiaomiCallRecordingPaths:
+        input.payload.xiaomiCallRecordingPaths?.length
+          ? input.payload.xiaomiCallRecordingPaths
+          : xiaomiPaths,
+      vivoCallRecordingPaths:
+        input.payload.vivoCallRecordingPaths?.length
+          ? input.payload.vivoCallRecordingPaths
+          : vivoPaths
+    };
+  }
+
+  private parsePathsEnv(rawValue: string | undefined) {
+    if (!rawValue?.trim()) {
+      return [];
+    }
+
+    const parsed = rawValue
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+
+    return parsed;
+  }
+
   async listPendingCommands(
     workspaceId: string,
     deviceId: string
@@ -84,6 +128,26 @@ export class DeviceRuntimeService {
     return {
       commands: commands.map((command: any) => this.toCommandView(command))
     };
+  }
+
+  async getCommand(
+    workspaceId: string,
+    deviceId: string,
+    commandId: string
+  ): Promise<DeviceCommandView> {
+    const command = await (this.prisma as any).deviceCommand.findFirst({
+      where: {
+        id: commandId,
+        workspaceId,
+        deviceId
+      }
+    });
+
+    if (!command) {
+      throw new NotFoundException("Device command not found.");
+    }
+
+    return this.toCommandView(command);
   }
 
   async acknowledgeCommand(

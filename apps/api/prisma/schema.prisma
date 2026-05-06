@@ -31,6 +31,7 @@ model Workspace {
   telemetryHistory DeviceTelemetryHistory[]
   notifications NotificationRecord[]
   callLogs      CallLogRecord[]
+  callRecordings CallRecordingRecord[]
   refreshTokens RefreshToken[]
   auditEvents AuditEvent[]
 }
@@ -69,6 +70,7 @@ model Device {
   telemetryHistory DeviceTelemetryHistory[]
   notifications  NotificationRecord[]
   callLogs       CallLogRecord[]
+  callRecordings CallRecordingRecord[]
 
   @@index([workspaceId])
   @@unique([workspaceId, fingerprint])
@@ -181,6 +183,29 @@ model CallLogRecord {
   @@index([deviceId, occurredAt])
   @@index([workspaceId, occurredAt])
   @@index([deviceId, callType, occurredAt])
+}
+
+model CallRecordingRecord {
+  id          String   @id @default(uuid()) @db.Uuid
+  clientId    String   @unique
+  fingerprint String
+  deviceId    String   @db.Uuid
+  workspaceId String   @db.Uuid
+  source      String
+  fileName    String
+  mimeType    String
+  extension   String
+  byteSize    Int
+  relativePath String
+  capturedAt  DateTime
+  contentBase64 String
+  createdAt   DateTime @default(now())
+  device      Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, fingerprint])
+  @@index([deviceId, capturedAt])
+  @@index([workspaceId, capturedAt])
 }
 
 model DeviceCapability {

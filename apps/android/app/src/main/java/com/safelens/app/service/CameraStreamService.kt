@@ -203,8 +203,8 @@ class CameraStreamService : Service() {
                         ?: includeAudio
                 preferredTransport =
                     startIntent?.getStringExtra(EXTRA_PREFERRED_TRANSPORT)
-                        ?.takeIf { it == "webrtc" || it == "mjpeg" }
-                        ?: preferredTransport
+                        ?.takeIf { it == "mjpeg" }
+                        ?: DEFAULT_PREFERRED_TRANSPORT
                 mjpegFrameIntervalMs =
                     max(
                         250,
@@ -316,7 +316,7 @@ class CameraStreamService : Service() {
                 activeSessionId = freshSessionState.sessionId
                 cameraFacing = freshSessionState.cameraFacing
                 includeAudio = freshSessionState.includeAudio
-                preferredTransport = freshSessionState.preferredTransport
+                preferredTransport = DEFAULT_PREFERRED_TRANSPORT
                 Log.i(
                     TAG,
                     "Starting camera stream sessionId=${freshSessionState.sessionId ?: "null"} transport=${freshSessionState.preferredTransport} includeAudio=${freshSessionState.includeAudio} micPermission=${repository.hasMicrophonePermission()}."
@@ -329,14 +329,8 @@ class CameraStreamService : Service() {
 
                 cleanupPeerConnections()
                 stopCaptureComponents()
-                if (freshSessionState.preferredTransport == "mjpeg") {
-                    startLocalMediaMjpegOnly()
-                    disconnectRealtimeSocket()
-                } else {
-                    ensurePeerConnectionFactory()
-                    startLocalMedia(freshSessionState)
-                    connectRealtimeSocket()
-                }
+                startLocalMediaMjpegOnly()
+                disconnectRealtimeSocket()
 
                 signalingReady = true
                 signalingReadySessionId = freshSessionState.sessionId
@@ -1285,7 +1279,7 @@ class CameraStreamService : Service() {
         private const val EXTRA_CAMERA_SESSION_ID = "camera_session_id"
         private const val EXTRA_FRAME_INTERVAL_MS = "frame_interval_ms"
         private const val DEFAULT_CAMERA_FACING = "back"
-        private const val DEFAULT_PREFERRED_TRANSPORT = "webrtc"
+        private const val DEFAULT_PREFERRED_TRANSPORT = "mjpeg"
         private const val DEFAULT_MJPEG_FRAME_INTERVAL_MS = 500
         private const val DEFAULT_CAPTURE_WIDTH = 640
         private const val DEFAULT_CAPTURE_HEIGHT = 480

@@ -30,7 +30,6 @@ export interface CameraStreamLiveState {
   status:
     | "idle"
     | "starting"
-    | "live_webrtc"
     | "live_mjpeg"
     | "stopping"
     | "failed"
@@ -39,12 +38,12 @@ export interface CameraStreamLiveState {
   includeAudio: boolean;
   audioAvailable: boolean;
   signalingReady: boolean;
-  preferredTransport: "webrtc" | "mjpeg";
-  activeTransport: "webrtc" | "mjpeg" | null;
+  preferredTransport: "mjpeg";
+  activeTransport: "mjpeg" | null;
   viewers: Array<{
     viewerId: string;
     socketId: string;
-    transport: "webrtc" | "mjpeg" | null;
+    transport: "mjpeg" | null;
     joinedAt: string;
   }>;
   iceServers: Array<{

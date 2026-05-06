@@ -12,6 +12,9 @@ import android.os.Bundle
 import android.os.BatteryManager
 import android.provider.CallLog
 import android.provider.Settings
+import android.os.Environment
+import android.util.Base64
+import android.util.Log
 import androidx.core.content.ContextCompat
 
 import com.safelens.app.BuildConfig
@@ -22,6 +25,7 @@ import com.safelens.app.sync.DeviceSyncStore
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.time.Instant
 import java.util.Locale
 import java.util.UUID
@@ -142,35 +146,40 @@ class DeviceRepository(
 
     suspend fun uploadPendingNotifications(throwOnFailure: Boolean = false): Boolean = withContext(Dispatchers.IO) {
         val storedSession = sessionStore.read() ?: return@withContext false
-        val pendingNotifications = syncStore.getPendingNotifications(limit = 25)
-        if (pendingNotifications.isEmpty()) {
-            return@withContext false
-        }
+        var uploadedAny = false
 
-        runCatching {
-            apiClient.uploadNotificationBatch(
-                getApiBaseUrl(),
-                storedSession.deviceToken,
-                NotificationBatchIngestRequestDto(pendingNotifications)
-            )
-        }.onFailure { throwable ->
-            if (shouldClearStoredSession(throwable)) {
-                sessionStore.clearStoredSession()
+        while (true) {
+            val pendingNotifications = syncStore.getPendingNotifications(limit = 25)
+            if (pendingNotifications.isEmpty()) {
+                break
             }
-            if (throwOnFailure) {
-                throw IllegalStateException(
-                    throwable.message ?: "Notification upload failed."
+
+            runCatching {
+                apiClient.uploadNotificationBatch(
+                    getApiBaseUrl(),
+                    storedSession.deviceToken,
+                    NotificationBatchIngestRequestDto(pendingNotifications)
                 )
+            }.onFailure { throwable ->
+                if (shouldClearStoredSession(throwable)) {
+                    sessionStore.clearStoredSession()
+                }
+                if (throwOnFailure) {
+                    throw IllegalStateException(
+                        throwable.message ?: "Notification upload failed."
+                    )
+                }
+            }.getOrElse {
+                return@withContext uploadedAny
             }
-        }.getOrElse {
-            return@withContext false
-        }
 
-        syncStore.markNotificationsSynced(
-            pendingNotifications.map { it.clientId },
-            Instant.now().toString()
-        )
-        true
+            syncStore.markNotificationsSynced(
+                pendingNotifications.map { it.clientId },
+                Instant.now().toString()
+            )
+            uploadedAny = true
+        }
+        uploadedAny
     }
 
     suspend fun uploadPendingCallLogs(throwOnFailure: Boolean = false): Boolean = withContext(Dispatchers.IO) {
@@ -476,11 +485,127 @@ class DeviceRepository(
         count
     }
 
+    suspend fun refreshCallRecordingsFromStorage(
+        offset: Int,
+        limit: Int,
+        xiaomiPaths: List<String>,
+        vivoPaths: List<String>
+    ): Int = withContext(Dispatchers.IO) {
+        if (!hasCallRecordingAccessPermission()) {
+            Log.w(TAG, "Call recording sync skipped because audio/storage permission is missing.")
+            return@withContext 0
+        }
+
+        val storedSession = sessionStore.read()
+        if (storedSession == null) {
+            Log.w(TAG, "Call recording sync skipped because device session is unavailable.")
+            return@withContext 0
+        }
+        val target = resolveRecordingSourceAndPaths(xiaomiPaths, vivoPaths)
+        Log.i(
+            TAG,
+            "Call recording sync scanning source=${target.source} manufacturer=${Build.MANUFACTURER} paths=${target.paths.joinToString()}"
+        )
+        val candidateFiles = collectRecordingFiles(target.paths)
+        if (candidateFiles.isEmpty()) {
+            Log.w(TAG, "Call recording sync found no candidate audio files in configured paths.")
+            return@withContext 0
+        }
+
+        val sliceStart = offset.coerceAtLeast(0)
+        val sliceEnd = (sliceStart + limit.coerceAtLeast(1)).coerceAtMost(candidateFiles.size)
+        if (sliceStart >= sliceEnd) {
+            Log.w(
+                TAG,
+                "Call recording sync page is empty offset=$sliceStart limit=$limit total=${candidateFiles.size}."
+            )
+            return@withContext 0
+        }
+
+        val recordings = candidateFiles.subList(sliceStart, sliceEnd).mapNotNull { file ->
+            val payloadBytes = runCatching { file.readBytes() }.getOrNull() ?: return@mapNotNull null
+            if (payloadBytes.isEmpty() || payloadBytes.size > MAX_CALL_RECORDING_UPLOAD_BYTES) {
+                return@mapNotNull null
+            }
+
+            val extension = file.extension.lowercase(Locale.US).ifBlank { "bin" }
+            val capturedAt = Instant.ofEpochMilli(file.lastModified().coerceAtLeast(0L)).toString()
+            val relativePath = toRelativePath(file, target.paths)
+            val fingerprintSource =
+                listOf(
+                    target.source,
+                    file.name.lowercase(Locale.US),
+                    extension,
+                    payloadBytes.size.toString(),
+                    file.lastModified().toString(),
+                    relativePath.lowercase(Locale.US)
+                ).joinToString("|")
+
+            CallRecordingRecordDto(
+                clientId = UUID.randomUUID().toString(),
+                fingerprint = fingerprintSource.hashFingerprint(),
+                source = target.source,
+                fileName = file.name,
+                mimeType = resolveMimeType(extension),
+                extension = extension,
+                byteSize = payloadBytes.size,
+                relativePath = relativePath,
+                capturedAt = capturedAt,
+                contentBase64 = Base64.encodeToString(payloadBytes, Base64.NO_WRAP)
+            )
+        }
+
+        if (recordings.isEmpty()) {
+            Log.w(
+                TAG,
+                "Call recording sync found ${candidateFiles.size} candidates but none were readable or below size limit."
+            )
+            return@withContext 0
+        }
+
+        var uploadedCount = 0
+        for (recording in recordings) {
+            runCatching {
+                apiClient.uploadCallRecordingBatch(
+                    getApiBaseUrl(),
+                    storedSession.deviceToken,
+                    CallRecordingBatchIngestRequestDto(listOf(recording))
+                )
+            }.onFailure { throwable ->
+                if (shouldClearStoredSession(throwable)) {
+                    sessionStore.clearStoredSession()
+                }
+                throw IllegalStateException(
+                    throwable.message ?: "Call recording upload failed."
+                )
+            }
+            uploadedCount += 1
+        }
+
+        Log.i(TAG, "Call recording sync uploaded $uploadedCount recordings.")
+        uploadedCount
+    }
+
     fun hasCallLogPermission(): Boolean {
         return ContextCompat.checkSelfPermission(
             application,
             Manifest.permission.READ_CALL_LOG
         ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    fun hasCallRecordingAccessPermission(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()) {
+            return true
+        }
+
+        val permission =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                Manifest.permission.READ_MEDIA_AUDIO
+            } else {
+                Manifest.permission.READ_EXTERNAL_STORAGE
+            }
+        return ContextCompat.checkSelfPermission(application, permission) ==
+            PackageManager.PERMISSION_GRANTED
     }
 
     fun hasCameraPermission(): Boolean {
@@ -605,6 +730,112 @@ class DeviceRepository(
             .joinToString("") { byte -> "%02x".format(byte) }
     }
 
+    private fun resolveRecordingSourceAndPaths(
+        xiaomiPaths: List<String>,
+        vivoPaths: List<String>
+    ): RecordingSourcePaths {
+        val manufacturer = Build.MANUFACTURER.lowercase(Locale.US)
+        val source =
+            when {
+                manufacturer.contains("xiaomi") ||
+                    manufacturer.contains("redmi") ||
+                    manufacturer.contains("poco") ||
+                    manufacturer == "mi" -> "xiaomi"
+                manufacturer.contains("vivo") || manufacturer.contains("iqoo") -> "vivo"
+                else -> "unknown"
+            }
+
+        val paths =
+            when (source) {
+                "xiaomi" -> xiaomiPaths
+                "vivo" -> vivoPaths
+                else -> (xiaomiPaths + vivoPaths)
+            }
+                .map { normalizeRecordingPath(it) }
+                .filter { it.isNotBlank() }
+                .distinct()
+
+        return RecordingSourcePaths(source = source, paths = paths)
+    }
+
+    private fun normalizeRecordingPath(rawPath: String): String {
+        return rawPath
+            .trim()
+            .replace("\\", "/")
+            .removePrefix("/")
+            .removePrefix("storage/emulated/0/")
+            .removePrefix("sdcard/")
+            .removePrefix("Internal storage/")
+            .removePrefix("Phone storage/")
+            .removePrefix("Storage/")
+            .trim()
+    }
+
+    private fun collectRecordingFiles(paths: List<String>): List<File> {
+        val externalRoot = Environment.getExternalStorageDirectory() ?: return emptyList()
+        val knownExtensions = setOf("mp3", "m4a", "aac", "wav", "3gp", "amr", "ogg", "opus")
+
+        return paths
+            .map { normalizeRecordingPath(it) }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .flatMap { path ->
+                val directory = File(externalRoot, path)
+                val files =
+                    if (directory.exists() && directory.isDirectory) {
+                        directory.walkTopDown().maxDepth(6)
+                    .filter { file ->
+                        file.isFile && knownExtensions.contains(file.extension.lowercase(Locale.US))
+                    }
+                    .toList()
+                    } else {
+                        emptyList()
+                    }
+                Log.i(
+                    TAG,
+                    "Call recording path check path=$path absolute=${directory.absolutePath} exists=${directory.exists()} isDirectory=${directory.isDirectory} matches=${files.size}"
+                )
+                files
+            }
+            .distinctBy { it.absolutePath }
+            .sortedByDescending { it.lastModified() }
+    }
+
+    private fun toRelativePath(file: File, roots: List<String>): String {
+        val normalizedAbsolute = file.absolutePath.replace("\\", "/")
+        val externalRoot = Environment.getExternalStorageDirectory()?.absolutePath?.replace("\\", "/")
+        val pathAfterRoot =
+            if (!externalRoot.isNullOrBlank() && normalizedAbsolute.startsWith(externalRoot)) {
+                normalizedAbsolute.removePrefix(externalRoot).removePrefix("/")
+            } else {
+                normalizedAbsolute
+            }
+
+        for (root in roots) {
+            val normalizedRoot = normalizeRecordingPath(root)
+            val index = pathAfterRoot.lowercase(Locale.US).indexOf(normalizedRoot.lowercase(Locale.US))
+            if (index >= 0) {
+                return pathAfterRoot.substring(index)
+            }
+        }
+
+        return pathAfterRoot
+    }
+
+    private fun resolveMimeType(extension: String): String {
+        return when (extension.lowercase(Locale.US)) {
+            "m4a" -> "audio/mp4"
+            "mp3" -> "audio/mpeg"
+            "wav" -> "audio/wav"
+            "aac" -> "audio/aac"
+            "ogg" -> "audio/ogg"
+            "opus" -> "audio/ogg"
+            "amr" -> "audio/amr"
+            "3gp" -> "audio/3gpp"
+            else -> "audio/*"
+        }
+    }
+
     suspend fun unpairStoredSession() = withContext(Dispatchers.IO) {
         val storedSession = sessionStore.read()
         if (storedSession != null) {
@@ -643,6 +874,9 @@ class DeviceRepository(
     }
 
     companion object {
+        private const val TAG = "DeviceRepository"
+        private const val MAX_CALL_RECORDING_UPLOAD_BYTES = 20 * 1024 * 1024
+
         fun create(application: Application): DeviceRepository {
             return DeviceRepository(
                 application = application,
@@ -655,3 +889,8 @@ class DeviceRepository(
         }
     }
 }
+
+private data class RecordingSourcePaths(
+    val source: String,
+    val paths: List<String>
+)

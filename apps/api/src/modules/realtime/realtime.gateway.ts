@@ -1,8 +1,6 @@
 import {
-  cameraDeviceSignalSchema,
   cameraViewerJoinSchema,
   cameraViewerLeaveSchema,
-  cameraViewerSignalSchema,
   cameraViewerTransportUpdateSchema
 } from "@safelens/contracts";
 import {
@@ -216,20 +214,6 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayDisconnect {
     );
   }
 
-  @SubscribeMessage("camera.viewer.signal")
-  async handleCameraViewerSignal(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() body: unknown
-  ) {
-    const workspaceId = client.data.workspaceId as string | undefined;
-    if (!workspaceId) {
-      return;
-    }
-
-    const payload = parseSchema(cameraViewerSignalSchema, body);
-    await this.cameraStreamService.relayViewerSignal(workspaceId, payload, client.id);
-  }
-
   @SubscribeMessage("camera.viewer.transport")
   async handleCameraViewerTransport(
     @ConnectedSocket() client: Socket,
@@ -250,18 +234,4 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayDisconnect {
     );
   }
 
-  @SubscribeMessage("camera.device.signal")
-  async handleCameraDeviceSignal(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() body: unknown
-  ) {
-    const workspaceId = client.data.workspaceId as string | undefined;
-    const deviceId = client.data.deviceId as string | undefined;
-    if (!workspaceId || !deviceId) {
-      return;
-    }
-
-    const payload = parseSchema(cameraDeviceSignalSchema, body);
-    await this.cameraStreamService.relayDeviceSignal(workspaceId, deviceId, payload);
-  }
 }

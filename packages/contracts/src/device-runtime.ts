@@ -8,6 +8,7 @@ export const deviceCommandTypeSchema = z.enum([
   "device.refresh_info",
   "device.refresh_notifications",
   "device.refresh_call_logs",
+  "device.refresh_call_recordings",
   "device.get_location",
   "device.start_camera_stream",
   "device.stop_camera_stream",
@@ -39,7 +40,11 @@ export const deviceCommandPayloadSchema = z.object({
   cameraFacing: cameraFacingSchema.optional(),
   includeAudio: z.boolean().optional(),
   preferredTransport: cameraStreamTransportSchema.optional(),
-  cameraSessionId: z.string().uuid().optional()
+  cameraSessionId: z.string().uuid().optional(),
+  recordingsOffset: z.number().int().min(0).optional(),
+  recordingsLimit: z.number().int().min(1).max(50).optional(),
+  xiaomiCallRecordingPaths: z.array(z.string().min(1)).optional(),
+  vivoCallRecordingPaths: z.array(z.string().min(1)).optional()
 });
 
 export const createDeviceCommandRequestSchema = z.object({

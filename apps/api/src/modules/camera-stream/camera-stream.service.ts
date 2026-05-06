@@ -28,7 +28,7 @@ import { RealtimeService } from "../realtime/realtime.service";
 
 const DEFAULT_CAMERA_FACING: CameraStreamSessionState["cameraFacing"] = "back";
 const DEFAULT_PREFERRED_TRANSPORT: CameraStreamSessionState["preferredTransport"] =
-  "webrtc";
+  "mjpeg";
 const DEFAULT_ICE_SERVERS: CameraStreamSessionState["iceServers"] = [
   {
     urls: ["stun:stun.l.google.com:19302"]
@@ -535,9 +535,6 @@ export class CameraStreamService {
     viewers: CameraStreamLiveState["viewers"]
   ): CameraStreamLiveState["status"] {
     const activeTransport = this.computeActiveTransport(viewers);
-    if (activeTransport === "webrtc") {
-      return "live_webrtc";
-    }
     if (activeTransport === "mjpeg") {
       return "live_mjpeg";
     }
@@ -545,9 +542,6 @@ export class CameraStreamService {
   }
 
   private computeActiveTransport(viewers: CameraStreamLiveState["viewers"]) {
-    if (viewers.some((viewer) => viewer.transport === "webrtc")) {
-      return "webrtc" as const;
-    }
     if (viewers.some((viewer) => viewer.transport === "mjpeg")) {
       return "mjpeg" as const;
     }
@@ -621,44 +615,13 @@ export class CameraStreamService {
 
   private resolvePreferredTransportForDevice(
     requestedTransport: CameraStreamSessionRequest["preferredTransport"],
-    device: {
+    _device: {
       manufacturer: string;
       model: string;
       fingerprint: string | null;
     }
   ): CameraStreamSessionRequest["preferredTransport"] {
-    if (requestedTransport !== "webrtc") {
-      return requestedTransport;
-    }
-
-    if (this.isWebrtcBlockedForDevice(device)) {
-      return "mjpeg";
-    }
-
-    return requestedTransport;
-  }
-
-  private isWebrtcBlockedForDevice(device: {
-    manufacturer: string;
-    model: string;
-    fingerprint: string | null;
-  }) {
-    const patternsRaw = this.configService.get<string>(
-      "CAMERA_STREAM_WEBRTC_BLOCKLIST_PATTERNS"
-    );
-    if (!patternsRaw?.trim()) {
-      return false;
-    }
-
-    const haystack = [device.manufacturer, device.model, device.fingerprint ?? ""]
-      .join(" ")
-      .toLowerCase();
-    const patterns = patternsRaw
-      .split(",")
-      .map((item) => item.trim().toLowerCase())
-      .filter((item) => item.length > 0);
-
-    return patterns.some((pattern) => haystack.includes(pattern));
+    return requestedTransport === "mjpeg" ? "mjpeg" : "mjpeg";
   }
 
   private async requireWorkspaceDevice(workspaceId: string, deviceId: string) {

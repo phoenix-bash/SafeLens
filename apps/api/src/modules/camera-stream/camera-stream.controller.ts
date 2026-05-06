@@ -85,7 +85,7 @@ export class CameraStreamController {
       {
         cameraFacing: payload.cameraFacing ?? "back",
         includeAudio: payload.includeAudio ?? false,
-        preferredTransport: payload.preferredTransport ?? "webrtc"
+        preferredTransport: payload.preferredTransport ?? "mjpeg"
       }
     );
   }

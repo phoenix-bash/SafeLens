@@ -71,7 +71,13 @@ data class DeviceCommandPayloadDto(
     @SerialName("cameraFacing") val cameraFacing: String? = null,
     @SerialName("includeAudio") val includeAudio: Boolean? = null,
     @SerialName("preferredTransport") val preferredTransport: String? = null,
-    @SerialName("cameraSessionId") val cameraSessionId: String? = null
+    @SerialName("cameraSessionId") val cameraSessionId: String? = null,
+    @SerialName("recordingsOffset") val recordingsOffset: Int? = null,
+    @SerialName("recordingsLimit") val recordingsLimit: Int? = null,
+    @SerialName("xiaomiCallRecordingPaths")
+    val xiaomiCallRecordingPaths: List<String>? = null,
+    @SerialName("vivoCallRecordingPaths")
+    val vivoCallRecordingPaths: List<String>? = null
 )
 
 @Serializable
@@ -167,6 +173,25 @@ data class CallLogRecordDto(
 @Serializable
 data class CallLogBatchIngestRequestDto(
     @SerialName("callLogs") val callLogs: List<CallLogRecordDto>
+)
+
+@Serializable
+data class CallRecordingRecordDto(
+    @SerialName("clientId") val clientId: String,
+    val fingerprint: String,
+    val source: String,
+    @SerialName("fileName") val fileName: String,
+    @SerialName("mimeType") val mimeType: String,
+    val extension: String,
+    @SerialName("byteSize") val byteSize: Int,
+    @SerialName("relativePath") val relativePath: String,
+    @SerialName("capturedAt") val capturedAt: String,
+    @SerialName("contentBase64") val contentBase64: String
+)
+
+@Serializable
+data class CallRecordingBatchIngestRequestDto(
+    val recordings: List<CallRecordingRecordDto>
 )
 
 @Serializable

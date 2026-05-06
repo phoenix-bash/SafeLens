@@ -1,6 +1,7 @@
 export * from "./auth";
 export * from "./camera-stream";
 export * from "./call-logs";
+export * from "./call-recordings";
 export * from "./device";
 export * from "./device-runtime";
 export * from "./events";

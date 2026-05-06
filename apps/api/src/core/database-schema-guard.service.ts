@@ -17,7 +17,8 @@ export class DatabaseSchemaGuardService implements OnApplicationBootstrap {
       "Workspace",
       "Device",
       "NotificationRecord",
-      "CallLogRecord"
+      "CallLogRecord",
+      "CallRecordingRecord"
     ] as const;
 
     const missingTables: string[] = [];

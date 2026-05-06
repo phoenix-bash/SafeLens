@@ -54,7 +54,7 @@ interface SyncSettingDao {
 
 @Dao
 interface NotificationRecordDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(record: NotificationRecordEntity)
 
     @Query(
@@ -69,9 +69,6 @@ interface NotificationRecordDao {
 
     @Query("UPDATE notification_records SET synced_at = :syncedAt WHERE client_id IN (:clientIds)")
     suspend fun markSynced(clientIds: List<String>, syncedAt: String)
-
-    @Query("DELETE FROM notification_records WHERE synced_at IS NOT NULL")
-    suspend fun deleteSynced()
 }
 
 @Dao

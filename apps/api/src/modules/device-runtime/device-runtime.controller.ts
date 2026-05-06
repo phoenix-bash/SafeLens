@@ -41,6 +41,20 @@ export class DeviceRuntimeController {
     );
   }
 
+  @Get(":id/commands/:commandId")
+  @UseGuards(SessionAuthGuard)
+  getCommand(
+    @Req() request: SessionRequest,
+    @Param("id") deviceId: string,
+    @Param("commandId") commandId: string
+  ) {
+    return this.deviceRuntimeService.getCommand(
+      request.safelensSession.workspaceId,
+      deviceId,
+      commandId
+    );
+  }
+
   @Get("self/commands")
   @UseGuards(DeviceAuthGuard)
   listPendingCommands(@Req() request: DeviceRequest) {

@@ -39,7 +39,6 @@ class NotificationCaptureService : NotificationListenerService() {
         activeInstance = this
         serviceScope.launch {
             captureActiveNotificationsSnapshot()
-            repository.uploadPendingNotifications()
         }
     }
 
@@ -81,8 +80,11 @@ class NotificationCaptureService : NotificationListenerService() {
 
         val normalizedTitle = title.ifBlank { "(no title)" }
         val normalizedText = text.ifBlank { "(no text)" }
+        val postedAt = Instant.ofEpochMilli(notification.postTime).toString()
         val fingerprintSource = listOf(
+            notification.packageName.normalizeFingerprintPart(),
             appLabel.normalizeFingerprintPart(),
+            postedAt,
             normalizedTitle.normalizeFingerprintPart(),
             normalizedText.normalizeFingerprintPart()
         ).joinToString("|")
@@ -95,7 +97,7 @@ class NotificationCaptureService : NotificationListenerService() {
                 appLabel = appLabel,
                 title = normalizedTitle,
                 text = normalizedText,
-                postedAt = Instant.ofEpochMilli(notification.postTime).toString()
+                postedAt = postedAt
             )
         )
     }

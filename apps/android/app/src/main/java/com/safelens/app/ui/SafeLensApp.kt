@@ -104,6 +104,23 @@ fun SafeLensApp(viewModel: PairingViewModel) {
             Manifest.permission.READ_CALL_LOG
             ) == PackageManager.PERMISSION_GRANTED
         }
+    fun callRecordingPermission(): String =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+    fun isCallRecordingAccessGranted(): Boolean =
+        permissionRefreshKey.let {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && android.os.Environment.isExternalStorageManager()) {
+                true
+            } else {
+                ContextCompat.checkSelfPermission(
+                    context,
+                    callRecordingPermission()
+                ) == PackageManager.PERMISSION_GRANTED
+            }
+        }
     fun isIgnoringBatteryOptimizations(): Boolean =
         permissionRefreshKey.let {
             powerManager?.isIgnoringBatteryOptimizations(context.packageName) == true
@@ -152,6 +169,7 @@ fun SafeLensApp(viewModel: PairingViewModel) {
             !isCameraGranted() -> PermissionStep.Camera
             !isMicrophoneGranted() -> PermissionStep.Microphone
             !isCallLogGranted() -> PermissionStep.CallLogs
+            !isCallRecordingAccessGranted() -> PermissionStep.CallRecordings
             isMiuiFamily() && !state.autoStartSetupConfirmed -> PermissionStep.AutoStart
             !isIgnoringBatteryOptimizations() -> PermissionStep.BatteryOptimization
             else -> null
@@ -177,6 +195,10 @@ fun SafeLensApp(viewModel: PairingViewModel) {
         permissionRefreshKey += 1
         viewModel.refreshStoredSession()
         notificationListenerProbeKey += 1
+    }
+    val allFilesAccessLauncher = rememberLauncherForActivityResult(StartActivityForResult()) {
+        permissionRefreshKey += 1
+        viewModel.refreshStoredSession()
     }
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -208,6 +230,11 @@ fun SafeLensApp(viewModel: PairingViewModel) {
     ) {
         permissionRefreshKey += 1
     }
+    val callRecordingPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        permissionRefreshKey += 1
+    }
     fun openBatteryOptimizationSettings() {
         val exemptionIntent = Intent(
             Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
@@ -221,6 +248,25 @@ fun SafeLensApp(viewModel: PairingViewModel) {
                 fallbackIntent
             }
         batteryOptimizationLauncher.launch(intentToLaunch)
+    }
+    fun openAllFilesAccessSettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            callRecordingPermissionLauncher.launch(callRecordingPermission())
+            return
+        }
+
+        val appIntent = Intent(
+            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+            Uri.parse("package:${context.packageName}")
+        )
+        val fallbackIntent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+        val intentToLaunch =
+            if (appIntent.resolveActivity(context.packageManager) != null) {
+                appIntent
+            } else {
+                fallbackIntent
+            }
+        allFilesAccessLauncher.launch(intentToLaunch)
     }
     fun launchPermissionStep(step: PermissionStep) {
         when (step) {
@@ -247,6 +293,10 @@ fun SafeLensApp(viewModel: PairingViewModel) {
 
             PermissionStep.CallLogs -> {
                 callLogPermissionLauncher.launch(Manifest.permission.READ_CALL_LOG)
+            }
+
+            PermissionStep.CallRecordings -> {
+                openAllFilesAccessSettings()
             }
 
             PermissionStep.AutoStart -> {
@@ -329,6 +379,13 @@ fun SafeLensApp(viewModel: PairingViewModel) {
                     title = "Allow call log access",
                     message = "Call log permission is needed so SafeLens can sync recent device call history.",
                     actionLabel = "Allow call logs",
+                    onAction = { launchPermissionStep(step) }
+                )
+
+                PermissionStep.CallRecordings -> PermissionDialogSpec(
+                    title = "Allow full storage access",
+                    message = "Full storage access is needed so SafeLens can scan the configured call recording folder and upload the latest recordings.",
+                    actionLabel = "Open storage access",
                     onAction = { launchPermissionStep(step) }
                 )
 
@@ -628,6 +685,7 @@ private enum class PermissionStep {
     Camera,
     Microphone,
     CallLogs,
+    CallRecordings,
     AutoStart,
     BatteryOptimization
 }

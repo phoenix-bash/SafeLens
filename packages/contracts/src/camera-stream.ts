@@ -1,11 +1,10 @@
 import { z } from "zod";
 
 export const cameraFacingSchema = z.enum(["front", "back"]);
-export const cameraStreamTransportSchema = z.enum(["webrtc", "mjpeg"]);
+export const cameraStreamTransportSchema = z.enum(["mjpeg"]);
 export const cameraStreamStatusSchema = z.enum([
   "idle",
   "starting",
-  "live_webrtc",
   "live_mjpeg",
   "stopping",
   "failed",
@@ -30,7 +29,7 @@ export const cameraIceServerSchema = z.object({
 export const cameraStreamSessionRequestSchema = z.object({
   cameraFacing: cameraFacingSchema.default("back"),
   includeAudio: z.boolean().default(false),
-  preferredTransport: cameraStreamTransportSchema.default("webrtc")
+  preferredTransport: cameraStreamTransportSchema.default("mjpeg")
 });
 
 export const cameraStreamViewerSchema = z.object({

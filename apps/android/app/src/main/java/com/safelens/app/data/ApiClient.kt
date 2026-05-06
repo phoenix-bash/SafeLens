@@ -148,6 +148,30 @@ class ApiClient(
         }
     }
 
+    fun uploadCallRecordingBatch(
+        apiBaseUrl: String,
+        deviceToken: String,
+        payload: CallRecordingBatchIngestRequestDto
+    ) {
+        val requestBody = json.encodeToString(CallRecordingBatchIngestRequestDto.serializer(), payload)
+            .toRequestBody("application/json".toMediaType())
+        val request = Request.Builder()
+            .url("${apiBaseUrl.trimEnd('/')}/devices/self/call-recordings/batches")
+            .post(requestBody)
+            .header("Authorization", "Bearer $deviceToken")
+            .build()
+
+        httpClient.newCall(request).execute().use { response ->
+            val rawBody = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw ApiException(
+                    response.code,
+                    "Call recording upload failed with status ${response.code}: $rawBody"
+                )
+            }
+        }
+    }
+
     fun uploadNotificationBatch(
         apiBaseUrl: String,
         deviceToken: String,
